@@ -4,7 +4,7 @@ use crate::{
 };
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _},
-    Address, BytesN, Env, String, Symbol,
+    token, Address, BytesN, Env, String, Symbol,
 };
 
 fn setup_contracts(env: &Env) -> (Address, PaymentProcessorClient<'_>, RefundManagerClient<'_>) {
@@ -14,7 +14,12 @@ fn setup_contracts(env: &Env) -> (Address, PaymentProcessorClient<'_>, RefundMan
     let refund_client = RefundManagerClient::new(env, &refund_manager);
     let payment_client = PaymentProcessorClient::new(env, &payment_processor);
     let admin = Address::generate(env);
-    refund_client.initialize_refund_manager(&admin);
+    let token_admin = Address::generate(env);
+    let usdc_token = env.register_stellar_asset_contract_v2(token_admin).address();
+    refund_client.initialize_refund_manager(&admin, &usdc_token);
+    let token_admin_client = token::StellarAssetClient::new(env, &usdc_token);
+    token_admin_client.mint(&refund_manager, &1_000_000_000_000i128);
+
     payment_client.initialize_payment_processor(&admin);
 
     (admin, payment_client, refund_client)

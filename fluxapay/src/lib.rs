@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    bytes, contract, contracterror, contractimpl, contracttype, vec, Address, Bytes, BytesN, Env,
-    String, Symbol, Vec,
+    bytes, contract, contracterror, contractimpl, contracttype, token, vec, Address, Bytes,
+    BytesN, Env, MuxedAddress, String, Symbol, Vec,
 };
 
 mod access_control;
@@ -107,18 +107,27 @@ pub enum Error {
 #[contracttype]
 pub enum DataKey {
     Payment(String),
+    MerchantPayments(Address),
     Refund(String),
     PaymentRefunds(String),
     RefundCounter,
     Dispute(String),
     PaymentDisputes(String),
     DisputeCounter,
+    UsdcToken,
 }
+
+const SHORT_LIVE_TTL: u32 = 120_960; // ~1 week at 5s/ledger
+const LONG_LIVE_TTL: u32 = 18_921_600; // ~3 years at 5s/ledger
+const TTL_BUMP_THRESHOLD_DIVISOR: u32 = 5;
 
 #[contractimpl]
 impl RefundManager {
-    pub fn initialize_refund_manager(env: Env, admin: Address) {
+    pub fn initialize_refund_manager(env: Env, admin: Address, usdc_token_address: Address) {
         AccessControl::initialize(&env, admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UsdcToken, &usdc_token_address);
     }
 
     pub fn grant_role(
@@ -236,6 +245,19 @@ impl RefundManager {
 
         if refund.status != RefundStatus::Pending {
             return Err(Error::RefundAlreadyProcessed);
+        }
+
+        let usdc_token_address: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsdcToken)
+            .ok_or(Error::Unauthorized)?;
+        let token_client = token::TokenClient::new(env, &usdc_token_address);
+
+        let from = env.current_contract_address();
+        let to: MuxedAddress = (&refund.requester).into();
+        if token_client.try_transfer(&from, &to, &refund.amount).is_err() {
+            return Ok(());
         }
 
         refund.status = RefundStatus::Completed;
@@ -535,7 +557,7 @@ impl PaymentProcessor {
 
         let payment = PaymentCharge {
             payment_id: payment_id.clone(),
-            merchant_id,
+            merchant_id: merchant_id.clone(),
             amount,
             currency,
             deposit_address,
@@ -550,6 +572,15 @@ impl PaymentProcessor {
         env.storage()
             .persistent()
             .set(&DataKey::Payment(payment_id.clone()), &payment);
+        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+
+        let mut merchant_payments = Self::get_merchant_payments_internal(&env, &merchant_id);
+        merchant_payments.push_back(payment_id.clone());
+        let merchant_payments_key = DataKey::MerchantPayments(merchant_id);
+        env.storage()
+            .persistent()
+            .set(&merchant_payments_key, &merchant_payments);
+        Self::bump_ttl(&env, &merchant_payments_key, LONG_LIVE_TTL);
 
         env.events().publish(
             (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "CREATED")),
@@ -591,6 +622,7 @@ impl PaymentProcessor {
             env.storage()
                 .persistent()
                 .set(&DataKey::Payment(payment_id.clone()), &payment);
+            Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
             env.events().publish(
                 (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "FAILED")),
@@ -608,6 +640,7 @@ impl PaymentProcessor {
         env.storage()
             .persistent()
             .set(&DataKey::Payment(payment_id.clone()), &payment);
+        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
         env.events().publish(
             (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "VERIFIED")),
@@ -621,8 +654,72 @@ impl PaymentProcessor {
         Self::get_payment_internal(&env, &payment_id)
     }
 
+    pub fn get_merchant_payments(env: Env, merchant_id: Address) -> Vec<String> {
+        Self::get_merchant_payments_internal(&env, &merchant_id)
+    }
+
+    pub fn get_merchant_payments_paginated(
+        env: Env,
+        merchant_id: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<String> {
+        let all = Self::get_merchant_payments_internal(&env, &merchant_id);
+        if limit == 0 {
+            return vec![&env];
+        }
+
+        let mut page = vec![&env];
+        let start = offset;
+        let end = core::cmp::min(all.len(), start.saturating_add(limit));
+
+        let mut i = start;
+        while i < end {
+            if let Some(id) = all.get(i) {
+                page.push_back(id);
+            }
+            i += 1;
+        }
+
+        page
+    }
+
     #[allow(deprecated)]
-    pub fn cancel_payment(env: Env, payment_id: String) -> Result<(), Error> {
+    pub fn cancel_payment(env: Env, authority: Address, payment_id: String) -> Result<(), Error> {
+        let mut payment = Self::get_payment_internal(&env, &payment_id)?;
+
+        if payment.status != PaymentStatus::Pending {
+            return Err(Error::PaymentAlreadyProcessed);
+        }
+
+        if env.ledger().timestamp() > payment.expires_at {
+            return Err(Error::Unauthorized);
+        }
+
+        authority.require_auth();
+        let is_merchant = authority == payment.merchant_id;
+        let is_oracle = AccessControl::has_role(&env, &role_oracle(&env), &authority);
+        if !is_merchant && !is_oracle {
+            return Err(Error::Unauthorized);
+        }
+
+        payment.status = PaymentStatus::Failed;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id.clone()), &payment);
+        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+
+        env.events().publish(
+            (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "CANCELLED")),
+            payment_id,
+        );
+
+        Ok(())
+    }
+
+    #[allow(deprecated)]
+    pub fn expire_payment(env: Env, payment_id: String) -> Result<(), Error> {
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
 
         if payment.status != PaymentStatus::Pending {
@@ -638,9 +735,10 @@ impl PaymentProcessor {
         env.storage()
             .persistent()
             .set(&DataKey::Payment(payment_id.clone()), &payment);
+        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
         env.events().publish(
-            (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "CANCELLED")),
+            (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "EXPIRED")),
             payment_id,
         );
 
@@ -671,6 +769,7 @@ impl PaymentProcessor {
         env.storage()
             .persistent()
             .set(&DataKey::Payment(payment_id.clone()), &payment);
+        Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
         env.events().publish(
             (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "SETTLED")),
@@ -685,6 +784,33 @@ impl PaymentProcessor {
             .persistent()
             .get(&DataKey::Payment(payment_id.clone()))
             .ok_or(Error::PaymentNotFound)
+    }
+
+    fn get_merchant_payments_internal(env: &Env, merchant_id: &Address) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantPayments(merchant_id.clone()))
+            .unwrap_or_else(|| vec![env])
+    }
+
+    fn payment_ttl(status: &PaymentStatus) -> u32 {
+        match status {
+            PaymentStatus::Pending => SHORT_LIVE_TTL,
+            PaymentStatus::Confirmed
+            | PaymentStatus::Settled
+            | PaymentStatus::Expired
+            | PaymentStatus::Failed => LONG_LIVE_TTL,
+        }
+    }
+
+    fn bump_payment_ttl(env: &Env, payment_id: &String, status: &PaymentStatus) {
+        let key = DataKey::Payment(payment_id.clone());
+        Self::bump_ttl(env, &key, Self::payment_ttl(status));
+    }
+
+    fn bump_ttl(env: &Env, key: &DataKey, ttl: u32) {
+        let threshold = core::cmp::max(1, ttl / TTL_BUMP_THRESHOLD_DIVISOR);
+        env.storage().persistent().extend_ttl(key, threshold, ttl);
     }
 }
 

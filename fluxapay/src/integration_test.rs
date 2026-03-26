@@ -7,7 +7,7 @@ use crate::{
 };
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
-    Address, BytesN, Env, String, Symbol,
+    token, Address, BytesN, Env, String, Symbol,
 };
 
 fn setup_integration(
@@ -27,7 +27,12 @@ fn setup_integration(
     let merchant_client = MerchantRegistryClient::new(env, &merchant_registry);
 
     let admin = Address::generate(env);
-    refund_client.initialize_refund_manager(&admin);
+    let token_admin = Address::generate(env);
+    let usdc_token = env.register_stellar_asset_contract_v2(token_admin).address();
+    refund_client.initialize_refund_manager(&admin, &usdc_token);
+    let token_admin_client = token::StellarAssetClient::new(env, &usdc_token);
+    token_admin_client.mint(&refund_manager, &1_000_000_000_000i128);
+
     payment_client.initialize_payment_processor(&admin);
     merchant_client.initialize(&admin);
 
@@ -167,8 +172,8 @@ fn test_failure_and_expiration_path() {
     // Jump forward in time
     env.ledger().set_timestamp(expires_at + 1);
 
-    // Cancel expired payment
-    payment_client.cancel_payment(&payment_id);
+    // Expire payment via cleanup path
+    payment_client.expire_payment(&payment_id);
 
     let payment_info = payment_client.get_payment(&payment_id);
     assert_eq!(payment_info.status, PaymentStatus::Expired);
