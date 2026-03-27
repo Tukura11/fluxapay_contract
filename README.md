@@ -1,10 +1,9 @@
-
-
 Fluxapay is a payment gateway on the Stellar blockchain that enables merchants to accept crypto payments and get settled in their local fiat currency.
 
 FluxaPay bridges the gap between crypto payments and real-world commerce—making stablecoin payments as easy to integrate as Stripe.
 
 ## CI/CD
+
 [![CI](https://github.com/MetroLogic/fluxapay_contract/actions/workflows/ci.yml/badge.svg)](https://github.com/MetroLogic/fluxapay_contract/actions/workflows/ci.yml)
 [![CD](https://github.com/MetroLogic/fluxapay_contract/actions/workflows/cd.yml/badge.svg)](https://github.com/MetroLogic/fluxapay_contract/actions/workflows/cd.yml)
 Automated testing and deployment pipeline using GitHub Actions:
@@ -126,6 +125,10 @@ Make stablecoin payments simple, practical, and accessible so merchants can sell
 
 Contributions are welcome!  
 Open an issue or submit a PR to help build Fluxapay.
+
+## Security
+
+Please refer to our [Security Policy](SECURITY.md) for information on reporting vulnerabilities and our current audit status.
 
 ## Telegram link
 
