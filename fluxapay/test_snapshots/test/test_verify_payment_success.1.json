@@ -107,7 +107,7 @@
                   "string": "payment_123"
                 },
                 {
-                  "bytes": "b78184006f5a7719b86d8ce70b9ca90fef3e4f1993754c89e8e468b382c72548"
+                  "bytes": "b08fbfbc05ef3b3b533c5670a29a3c98d77d0320ef7bf0340c334f4d9e44d8c4"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
@@ -269,6 +269,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "amount_received"
+                      },
+                      "val": {
+                        "i128": "1000000000"
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "confirmed_at"
                       },
                       "val": {
@@ -348,7 +356,7 @@
                         "symbol": "transaction_hash"
                       },
                       "val": {
-                        "bytes": "b78184006f5a7719b86d8ce70b9ca90fef3e4f1993754c89e8e468b382c72548"
+                        "bytes": "b08fbfbc05ef3b3b533c5670a29a3c98d77d0320ef7bf0340c334f4d9e44d8c4"
                       }
                     }
                   ]

@@ -175,7 +175,7 @@
                   "string": "pay_auth_test"
                 },
                 {
-                  "bytes": "c5123079121e515d49a740877f21fc4488ded3184349c371fd7548665a165d2e"
+                  "bytes": "eff2659783824f1f3f792048bfd715b1606e5e84c383f29608186d00ee5700e9"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
@@ -456,6 +456,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "amount_received"
+                      },
+                      "val": {
+                        "i128": "500"
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "confirmed_at"
                       },
                       "val": {
@@ -535,7 +543,7 @@
                         "symbol": "transaction_hash"
                       },
                       "val": {
-                        "bytes": "c5123079121e515d49a740877f21fc4488ded3184349c371fd7548665a165d2e"
+                        "bytes": "eff2659783824f1f3f792048bfd715b1606e5e84c383f29608186d00ee5700e9"
                       }
                     }
                   ]
@@ -1139,6 +1147,12 @@
                       "val": {
                         "i128": "500"
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "amount_received"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {

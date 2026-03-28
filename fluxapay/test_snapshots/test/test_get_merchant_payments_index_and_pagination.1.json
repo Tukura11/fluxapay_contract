@@ -288,6 +288,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "amount_received"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "confirmed_at"
                       },
                       "val": "void"
@@ -420,6 +426,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "amount_received"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "confirmed_at"
                       },
                       "val": "void"
@@ -549,6 +561,12 @@
                       "val": {
                         "i128": "300"
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "amount_received"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {

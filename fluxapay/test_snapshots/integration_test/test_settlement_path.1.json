@@ -177,7 +177,7 @@
                   "string": "PAY_SETTLE"
                 },
                 {
-                  "bytes": "5fe191a1ba71fbcad6bd8ef2c426677ea37fa716ea1fbaee65838d560fd39038"
+                  "bytes": "ae763c13d89b63fc634b353914c128ca672ac050f69dd00d84b9eef3592c8862"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
@@ -425,6 +425,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "amount_received"
+                      },
+                      "val": {
+                        "i128": "2000"
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "confirmed_at"
                       },
                       "val": {
@@ -504,7 +512,7 @@
                         "symbol": "transaction_hash"
                       },
                       "val": {
-                        "bytes": "5fe191a1ba71fbcad6bd8ef2c426677ea37fa716ea1fbaee65838d560fd39038"
+                        "bytes": "ae763c13d89b63fc634b353914c128ca672ac050f69dd00d84b9eef3592c8862"
                       }
                     }
                   ]

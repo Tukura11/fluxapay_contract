@@ -212,6 +212,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "amount_received"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "confirmed_at"
                       },
                       "val": "void"

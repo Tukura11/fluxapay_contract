@@ -32,6 +32,8 @@ pub struct PaymentCharge {
     pub created_at: u64,
     pub confirmed_at: Option<u64>,
     pub expires_at: u64,
+    /// Actual amount received on-chain; set by verify_payment for reconciliation.
+    pub amount_received: Option<i128>,
 }
 
 #[contracttype]
@@ -42,7 +44,17 @@ pub enum PaymentStatus {
     Settled,
     Expired,
     Failed,
+    /// Customer sent less than the required amount (within tolerance but below threshold).
+    PartiallyPaid,
+    /// Customer sent more than the required amount (e.g. tip or rounding).
+    Overpaid,
 }
+
+/// Tolerance in stroops (1 stroop = 0.0000001 XLM / smallest USDC unit).
+/// Payments within ±PAYMENT_TOLERANCE of the expected amount are accepted as Confirmed.
+/// Amounts below (expected - PAYMENT_TOLERANCE) → PartiallyPaid.
+/// Amounts above (expected + PAYMENT_TOLERANCE) → Overpaid.
+pub const PAYMENT_TOLERANCE: i128 = 1;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -204,6 +216,7 @@ impl RefundManager {
                 created_at: env.ledger().timestamp(),
                 confirmed_at: None,
                 expires_at: 0,
+                amount_received: None,
             };
             env.storage()
                 .persistent()
@@ -685,7 +698,9 @@ impl RefundManager {
             PaymentStatus::Confirmed
             | PaymentStatus::Settled
             | PaymentStatus::Expired
-            | PaymentStatus::Failed => LONG_LIVE_TTL,
+            | PaymentStatus::Failed
+            | PaymentStatus::PartiallyPaid
+            | PaymentStatus::Overpaid => LONG_LIVE_TTL,
         }
     }
 
@@ -760,6 +775,7 @@ impl PaymentProcessor {
             created_at: env.ledger().timestamp(),
             confirmed_at: None,
             expires_at,
+            amount_received: None,
         };
 
         env.storage()
@@ -808,37 +824,48 @@ impl PaymentProcessor {
             return Err(Error::PaymentExpired);
         }
 
-        if amount_received != payment.amount {
-            payment.status = PaymentStatus::Failed;
-            env.storage()
-                .persistent()
-                .set(&DataKey::Payment(payment_id.clone()), &payment);
-            Self::bump_payment_ttl(&env, &payment_id, &payment.status);
-
-            env.events().publish(
-                (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "FAILED")),
-                payment_id,
-            );
-
-            return Ok(PaymentStatus::Failed);
-        }
-
-        payment.status = PaymentStatus::Confirmed;
+        // Record the actual amount received for reconciliation
+        payment.amount_received = Some(amount_received);
         payment.payer_address = Some(payer_address);
         payment.transaction_hash = Some(transaction_hash);
         payment.confirmed_at = Some(env.ledger().timestamp());
+
+        let diff = amount_received - payment.amount;
+
+        let new_status = if diff >= 0 && diff <= PAYMENT_TOLERANCE {
+            // Exact match or tiny overpay within tolerance → Confirmed
+            PaymentStatus::Confirmed
+        } else if diff > PAYMENT_TOLERANCE {
+            // Meaningfully more than expected → Overpaid
+            PaymentStatus::Overpaid
+        } else if diff >= -PAYMENT_TOLERANCE {
+            // Tiny underpay within tolerance → Confirmed
+            PaymentStatus::Confirmed
+        } else {
+            // Meaningfully less than expected → PartiallyPaid
+            PaymentStatus::PartiallyPaid
+        };
+
+        payment.status = new_status.clone();
 
         env.storage()
             .persistent()
             .set(&DataKey::Payment(payment_id.clone()), &payment);
         Self::bump_payment_ttl(&env, &payment_id, &payment.status);
 
+        let event_name = match &new_status {
+            PaymentStatus::Confirmed => Symbol::new(&env, "VERIFIED"),
+            PaymentStatus::Overpaid => Symbol::new(&env, "OVERPAID"),
+            PaymentStatus::PartiallyPaid => Symbol::new(&env, "PARTIALLY_PAID"),
+            _ => Symbol::new(&env, "FAILED"),
+        };
+
         env.events().publish(
-            (Symbol::new(&env, "PAYMENT"), Symbol::new(&env, "VERIFIED")),
-            payment_id,
+            (Symbol::new(&env, "PAYMENT"), event_name),
+            (payment_id, amount_received),
         );
 
-        Ok(PaymentStatus::Confirmed)
+        Ok(new_status)
     }
 
     pub fn get_payment(env: Env, payment_id: String) -> Result<PaymentCharge, Error> {
@@ -990,7 +1017,9 @@ impl PaymentProcessor {
             PaymentStatus::Confirmed
             | PaymentStatus::Settled
             | PaymentStatus::Expired
-            | PaymentStatus::Failed => LONG_LIVE_TTL,
+            | PaymentStatus::Failed
+            | PaymentStatus::PartiallyPaid
+            | PaymentStatus::Overpaid => LONG_LIVE_TTL,
         }
     }
 

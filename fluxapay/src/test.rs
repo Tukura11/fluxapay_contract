@@ -98,6 +98,127 @@ fn test_verify_payment_success() {
     assert_eq!(status, PaymentStatus::Confirmed);
     let payment = client.get_payment(&payment_id);
     assert_eq!(payment.status, PaymentStatus::Confirmed);
+    assert_eq!(payment.amount_received, Some(amount));
+}
+
+#[test]
+fn test_verify_payment_partially_paid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "partial_pay");
+    let merchant_id = Address::generate(&env);
+    let amount = 1000000000i128;
+    let expires_at = env.ledger().timestamp() + 3600;
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &amount,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &expires_at,
+    );
+
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    // Send significantly less than expected (outside tolerance)
+    let amount_received = amount - 100;
+    let status = client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &amount_received,
+    );
+
+    assert_eq!(status, PaymentStatus::PartiallyPaid);
+    let payment = client.get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::PartiallyPaid);
+    assert_eq!(payment.amount_received, Some(amount_received));
+}
+
+#[test]
+fn test_verify_payment_overpaid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "over_pay");
+    let merchant_id = Address::generate(&env);
+    let amount = 1000000000i128;
+    let expires_at = env.ledger().timestamp() + 3600;
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &amount,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &expires_at,
+    );
+
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    // Send more than expected (outside tolerance)
+    let amount_received = amount + 100;
+    let status = client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &amount_received,
+    );
+
+    assert_eq!(status, PaymentStatus::Overpaid);
+    let payment = client.get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Overpaid);
+    assert_eq!(payment.amount_received, Some(amount_received));
+}
+
+#[test]
+fn test_verify_payment_within_tolerance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "tol_pay");
+    let merchant_id = Address::generate(&env);
+    let amount = 1000000000i128;
+    let expires_at = env.ledger().timestamp() + 3600;
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &amount,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &expires_at,
+    );
+
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    // Send exactly 1 stroop less — within tolerance → Confirmed
+    let amount_received = amount - 1;
+    let status = client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &amount_received,
+    );
+
+    assert_eq!(status, PaymentStatus::Confirmed);
+    let payment = client.get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Confirmed);
+    assert_eq!(payment.amount_received, Some(amount_received));
 }
 
 #[test]
