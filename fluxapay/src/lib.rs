@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)] // Soroban contractargs macro generates fns exceeding the 7-arg limit
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env,
     MuxedAddress, String, Symbol, Vec,
@@ -158,6 +159,7 @@ const CREATE_PAYMENT_WINDOW_SECS: u64 = 60;
 const CREATE_PAYMENT_MAX_PER_WINDOW: u32 = 30;
 
 #[contractimpl]
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 impl RefundManager {
     pub fn version() -> u32 {
         1
@@ -305,12 +307,12 @@ impl RefundManager {
             return Err(Error::RefundExceedsPayment);
         }
 
-        let counter = Self::get_next_refund_id(&env);
+        let counter = Self::get_next_refund_id(env);
 
         // Build refund ID: "refund_" + counter
         // For simplicity and to avoid complex string manipulation in no_std,
         // we use a match statement for common cases
-        let refund_id = format_id(&env, "refund_", counter);
+        let refund_id = format_id(env, "refund_", counter);
 
         let refund = Refund {
             refund_id: refund_id.clone(),
@@ -334,12 +336,12 @@ impl RefundManager {
             &payment_refunds,
         );
         Self::bump_ttl(
-            &env,
+            env,
             &DataKey::PaymentRefunds(payment_id.clone()),
             LONG_LIVE_TTL,
         );
 
-        Self::bump_refund_ttl(&env, &refund_id, &refund.status);
+        Self::bump_refund_ttl(env, &refund_id, &refund.status);
 
         // Issue #27: emit REFUND/CREATED event
         env.events().publish(
@@ -396,9 +398,7 @@ impl RefundManager {
         env.storage()
             .persistent()
             .set(&DataKey::Refund(refund_id.clone()), &refund);
-        Self::bump_refund_ttl(&env, &refund_id, &refund.status);
-
-        // Issue #27: emit REFUND/COMPLETED event
+        Self::bump_refund_ttl(env, &refund_id, &refund.status);
         env.events().publish(
             (Symbol::new(env, "REFUND"), Symbol::new(env, "COMPLETED")),
             (refund.payment_id, refund_id, refund.amount),
@@ -811,6 +811,7 @@ impl RefundManager {
 }
 
 #[contractimpl]
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 impl PaymentProcessor {
     pub fn version() -> u32 {
         1
@@ -924,6 +925,7 @@ impl PaymentProcessor {
     }
 
     #[allow(deprecated)]
+    #[allow(clippy::too_many_arguments)]
     pub fn create_payment(
         env: Env,
         payment_id: String,
@@ -1068,7 +1070,7 @@ impl PaymentProcessor {
 
         let diff = amount_received - payment.amount;
 
-        let new_status = if diff >= 0 && diff <= PAYMENT_TOLERANCE {
+        let new_status = if (0..=PAYMENT_TOLERANCE).contains(&diff) {
             // Exact match or tiny overpay within tolerance → Confirmed
             PaymentStatus::Confirmed
         } else if diff > PAYMENT_TOLERANCE {

@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use crate::format_id;
 use proptest::prelude::*;
 use soroban_sdk::{

@@ -29,6 +29,7 @@ pub enum OracleDataKey {
 }
 
 #[contractimpl]
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 impl FXOracle {
     pub fn version() -> u32 {
         1

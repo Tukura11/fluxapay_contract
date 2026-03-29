@@ -54,6 +54,7 @@ pub enum MerchantError {
 }
 
 #[contractimpl]
+#[allow(deprecated)] // events::publish — migrate to #[contractevent] in a follow-up
 impl MerchantRegistry {
     pub fn version() -> u32 {
         1
