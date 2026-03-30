@@ -1017,10 +1017,8 @@ impl PaymentProcessor {
                 crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
             match registry_client.try_get_merchant(&merchant_id) {
                 Ok(Ok(merchant)) => {
-                    // Require merchant to be verified (not Unverified) and active
-                    if merchant.kyc_tier == crate::merchant_registry::KycTier::Unverified
-                        || !merchant.active
-                    {
+                    // Require merchant to be verified (not Unverified), active, and not suspended
+                    if merchant.kyc_tier == crate::merchant_registry::KycTier::Unverified || !merchant.active || merchant.suspended_at.is_some() {
                         return Err(Error::Unauthorized);
                     }
                 }
