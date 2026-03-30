@@ -337,12 +337,12 @@ fn test_get_merchant_payments_index_and_pagination() {
 }
 
 #[test]
-fn test_cancel_payment_before_expiry_by_merchant() {
+fn test_cancel_pending_success() {
     let env = Env::default();
     env.mock_all_auths();
     let (admin, client) = setup_payment_processor(&env);
 
-    let payment_id = String::from_str(&env, "cancel_before_expiry");
+    let payment_id = String::from_str(&env, "cancel_pending_success");
     let merchant_id = Address::generate(&env);
     let expires_at = env.ledger().timestamp() + 3600;
     client.grant_role(&admin, &role_merchant(&env), &merchant_id);
@@ -358,10 +358,125 @@ fn test_cancel_payment_before_expiry_by_merchant() {
         &None::<String>,
     );
 
+    // Set time to before expiry
+    env.ledger().set_timestamp(expires_at - 1);
+
     client.cancel_payment(&merchant_id, &payment_id);
 
     let payment = client.get_payment(&payment_id);
     assert_eq!(payment.status, PaymentStatus::Failed);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    let topics = last_event.1;
+    assert_eq!(topics.get(0).unwrap(), Symbol::new(&env, "PAYMENT").into_val(&env));
+    assert_eq!(topics.get(1).unwrap(), Symbol::new(&env, "CANCELLED").into_val(&env));
+    assert_eq!(topics.get(2).unwrap(), payment_id.into_val(&env));
+}
+
+#[test]
+fn test_cancel_fails_when_confirmed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "cancel_fails_confirmed");
+    let merchant_id = Address::generate(&env);
+    let amount = 500i128;
+    let expires_at = env.ledger().timestamp() + 3600;
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &amount,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &expires_at,
+        &None::<String>,
+        &None::<String>,
+    );
+
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &amount,
+    );
+
+    let res = client.try_cancel_payment(&merchant_id, &payment_id);
+    assert_eq!(res.unwrap_err().unwrap(), Error::PaymentAlreadyProcessed);
+}
+
+#[test]
+fn test_expiry_logic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "cancel_past_expiry");
+    let merchant_id = Address::generate(&env);
+    let expires_at = env.ledger().timestamp() + 3600;
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &500i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &expires_at,
+        &None::<String>,
+        &None::<String>,
+    );
+
+    // Set time to past expiry
+    env.ledger().set_timestamp(expires_at + 1);
+
+    // This should correctly mark it Expired, not throw an error
+    let res = client.try_cancel_payment(&merchant_id, &payment_id);
+    assert!(res.is_ok());
+
+    let payment = client.get_payment(&payment_id);
+    assert_eq!(payment.status, PaymentStatus::Expired);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    let topics = last_event.1;
+    assert_eq!(topics.get(0).unwrap(), Symbol::new(&env, "PAYMENT").into_val(&env));
+    assert_eq!(topics.get(1).unwrap(), Symbol::new(&env, "EXPIRED").into_val(&env));
+    assert_eq!(topics.get(2).unwrap(), payment_id.into_val(&env));
+}
+
+#[test]
+fn test_unauthorized_cancel() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "unauth_cancel");
+    let merchant_id = Address::generate(&env);
+    let expires_at = env.ledger().timestamp() + 3600;
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &500i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &expires_at,
+        &None::<String>,
+        &None::<String>,
+    );
+
+    let random_addr = Address::generate(&env);
+    let res = client.try_cancel_payment(&random_addr, &payment_id);
+    assert_eq!(res.unwrap_err().unwrap(), Error::Unauthorized);
 }
 
 #[test]
