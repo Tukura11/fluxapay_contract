@@ -138,6 +138,7 @@ pub enum Error {
     AmountBelowMin = 21,
     AmountAboveMax = 22,
     InvalidExpiry = 23,
+    InvalidSettlement = 24,
 }
 
 #[contracttype]
@@ -152,6 +153,14 @@ pub struct MerchantCreateRateLimit {
 pub struct AmountLimits {
     pub min: Option<i128>,
     pub max: Option<i128>,
+}
+
+/// A single recipient in a multi-account settlement split.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementSplit {
+    pub recipient: Address,
+    pub amount: i128,
 }
 
 #[contracttype]
@@ -1534,7 +1543,7 @@ impl PaymentProcessor {
         env: Env,
         operator: Address,
         payment_id: String,
-        treasury_address: Address,
+        splits: Vec<SettlementSplit>,
     ) -> Result<(), Error> {
         operator.require_auth();
 
@@ -1545,11 +1554,26 @@ impl PaymentProcessor {
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
 
         if payment.status != PaymentStatus::Confirmed {
-            return Err(Error::PaymentAlreadyProcessed); // Or another appropriate error
+            return Err(Error::PaymentAlreadyProcessed);
+        }
+
+        if splits.is_empty() {
+            return Err(Error::InvalidSettlement);
+        }
+
+        // Verify split amounts are positive and total matches payment amount
+        let mut total: i128 = 0;
+        for split in splits.iter() {
+            if split.amount <= 0 {
+                return Err(Error::InvalidSettlement);
+            }
+            total = total.saturating_add(split.amount);
+        }
+        if total != payment.amount {
+            return Err(Error::InvalidSettlement);
         }
 
         payment.status = PaymentStatus::Settled;
-        payment.deposit_address = treasury_address; // "Sweep to treasury"
 
         env.storage()
             .persistent()

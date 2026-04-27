@@ -1,11 +1,11 @@
 use crate::{
     merchant_registry::{KycTier, MerchantRegistry, MerchantRegistryClient},
     DisputeStatus, PaymentProcessor, PaymentProcessorClient, PaymentStatus, RefundManager,
-    RefundManagerClient, RefundStatus,
+    RefundManagerClient, RefundStatus, SettlementSplit,
 };
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
-    token, Address, BytesN, Env, String, Symbol,
+    token, vec, Address, BytesN, Env, String, Symbol,
 };
 
 fn setup_integration(
@@ -155,12 +155,12 @@ fn test_settlement_path() {
         &amount,
     );
 
-    // Settle payment (Sweep to treasury)
-    payment_client.settle_payment(&operator, &payment_id, &treasury);
+    // Settle payment to treasury as a single split
+    let splits = vec![&env, SettlementSplit { recipient: treasury.clone(), amount }];
+    payment_client.settle_payment(&operator, &payment_id, &splits);
 
     let payment_info = payment_client.get_payment(&payment_id);
     assert_eq!(payment_info.status, PaymentStatus::Settled);
-    assert_eq!(payment_info.deposit_address, treasury);
 }
 
 #[test]

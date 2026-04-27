@@ -4,7 +4,7 @@ use super::*;
 use access_control::{role_admin, role_oracle, role_settlement_operator};
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Events as _, Ledger as _},
-    token, Address, BytesN, Env, String, Symbol,
+    token, vec, Address, BytesN, Env, String, Symbol,
 };
 
 fn setup_payment_processor(env: &Env) -> (Address, PaymentProcessorClient<'_>) {
@@ -1836,4 +1836,145 @@ fn test_rejected_refunds_not_counted_in_cumulative_total() {
     let refund = client.get_refund(&new_refund_id);
     assert_eq!(refund.amount, payment_amount);
     assert_eq!(refund.status, RefundStatus::Pending);
+}
+
+// --- Multi-account settlement tests ---
+
+fn make_confirmed_payment(
+    env: &Env,
+    client: &PaymentProcessorClient,
+    admin: &Address,
+    payment_id: &String,
+    amount: i128,
+) {
+    let merchant = Address::generate(env);
+    let oracle = Address::generate(env);
+    client.grant_role(admin, &role_merchant(env), &merchant);
+    client.grant_role(admin, &role_oracle(env), &oracle);
+    client.create_payment(
+        payment_id,
+        &merchant,
+        &amount,
+        &Symbol::new(env, "USDC"),
+        &Address::generate(env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+        &None::<String>,
+    );
+    client.verify_payment(
+        &oracle,
+        payment_id,
+        &BytesN::<32>::random(env),
+        &Address::generate(env),
+        &amount,
+    );
+}
+
+#[test]
+fn test_settle_payment_single_split() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "settle_single");
+    let amount = 1000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    let recipient = Address::generate(&env);
+    let splits = vec![&env, SettlementSplit { recipient, amount }];
+    client.settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(client.get_payment(&payment_id).status, PaymentStatus::Settled);
+}
+
+#[test]
+fn test_settle_payment_multi_split() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "settle_multi");
+    let amount = 1000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    let splits = vec![
+        &env,
+        SettlementSplit { recipient: Address::generate(&env), amount: 600 },
+        SettlementSplit { recipient: Address::generate(&env), amount: 400 },
+    ];
+    client.settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(client.get_payment(&payment_id).status, PaymentStatus::Settled);
+}
+
+#[test]
+fn test_settle_payment_split_total_mismatch_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "settle_mismatch");
+    let amount = 1000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    // Total is 900, not 1000 — must fail
+    let splits = vec![
+        &env,
+        SettlementSplit { recipient: Address::generate(&env), amount: 500 },
+        SettlementSplit { recipient: Address::generate(&env), amount: 400 },
+    ];
+    let result = client.try_settle_payment(&operator, &payment_id, &splits);
+    assert_eq!(result, Err(Ok(Error::InvalidSettlement)));
+}
+
+#[test]
+fn test_settle_payment_empty_splits_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "settle_empty");
+    let amount = 1000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    let splits = vec![&env];
+    let result = client.try_settle_payment(&operator, &payment_id, &splits);
+    assert_eq!(result, Err(Ok(Error::InvalidSettlement)));
+}
+
+#[test]
+fn test_settle_payment_zero_amount_split_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "settle_zero");
+    let amount = 1000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    let splits = vec![
+        &env,
+        SettlementSplit { recipient: Address::generate(&env), amount: 1000 },
+        SettlementSplit { recipient: Address::generate(&env), amount: 0 },
+    ];
+    let result = client.try_settle_payment(&operator, &payment_id, &splits);
+    assert_eq!(result, Err(Ok(Error::InvalidSettlement)));
 }
