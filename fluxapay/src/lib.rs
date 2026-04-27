@@ -41,6 +41,8 @@ pub struct PaymentCharge {
     pub memo: Option<String>,
     /// Optional memo type: Text, Id, Hash, or Return.
     pub memo_type: Option<String>,
+    /// Token contract address used for this payment (None defaults to the configured USDC token).
+    pub token_address: Option<Address>,
 }
 
 #[contracttype]
@@ -132,6 +134,10 @@ pub enum Error {
     ContractPaused = 17,
     RateLimitExceeded = 18,
     RefundCancelled = 19,
+    UnsupportedToken = 20,
+    AmountBelowMin = 21,
+    AmountAboveMax = 22,
+    InvalidExpiry = 23,
 }
 
 #[contracttype]
@@ -139,6 +145,13 @@ pub enum Error {
 pub struct MerchantCreateRateLimit {
     pub last_payment_at: u64,
     pub count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmountLimits {
+    pub min: Option<i128>,
+    pub max: Option<i128>,
 }
 
 #[contracttype]
@@ -155,6 +168,9 @@ pub enum DataKey {
     UsdcToken,
     Paused,
     MerchantRegistryAddress,
+    AllowedToken(Address),
+    MerchantAmountLimits(Address),
+    GlobalAmountLimits,
 }
 
 const SHORT_LIVE_TTL: u32 = 120_960; // ~1 week at 5s/ledger
@@ -162,6 +178,8 @@ const LONG_LIVE_TTL: u32 = 18_921_600; // ~3 years at 5s/ledger
 const TTL_BUMP_THRESHOLD_DIVISOR: u32 = 5;
 const CREATE_PAYMENT_WINDOW_SECS: u64 = 60;
 const CREATE_PAYMENT_MAX_PER_WINDOW: u32 = 30;
+/// Default payment validity window: 1 hour.
+pub const DEFAULT_PAYMENT_DURATION_SECS: u64 = 3_600;
 /// 1% refund fee in basis points (100 bps = 1%).
 const REFUND_FEE_BPS: i128 = 100;
 
@@ -252,6 +270,7 @@ impl RefundManager {
                 amount_received: None,
                 memo: None,
                 memo_type: None,
+                token_address: None,
             };
             env.storage()
                 .persistent()
@@ -1040,6 +1059,115 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Set per-merchant min/max payment amount limits (merchant self-service).
+    /// Pass None to clear a bound. Requires the caller to hold the MERCHANT role.
+    pub fn set_merchant_amount_limits(
+        env: Env,
+        merchant_id: Address,
+        min: Option<i128>,
+        max: Option<i128>,
+    ) -> Result<(), Error> {
+        merchant_id.require_auth();
+        if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
+            return Err(Error::Unauthorized);
+        }
+        if let (Some(lo), Some(hi)) = (min, max) {
+            if lo > hi {
+                return Err(Error::InvalidAmount);
+            }
+        }
+        let limits = AmountLimits { min, max };
+        env.storage()
+            .persistent()
+            .set(&DataKey::MerchantAmountLimits(merchant_id), &limits);
+        Ok(())
+    }
+
+    /// Read per-merchant amount limits.
+    pub fn get_merchant_amount_limits(env: Env, merchant_id: Address) -> Option<AmountLimits> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantAmountLimits(merchant_id))
+    }
+
+    /// Set global min/max payment amount limits (admin only).
+    /// Pass None to clear a bound.
+    pub fn set_global_amount_limits(
+        env: Env,
+        admin: Address,
+        min: Option<i128>,
+        max: Option<i128>,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        if let (Some(lo), Some(hi)) = (min, max) {
+            if lo > hi {
+                return Err(Error::InvalidAmount);
+            }
+        }
+        let limits = AmountLimits { min, max };
+        env.storage()
+            .persistent()
+            .set(&DataKey::GlobalAmountLimits, &limits);
+        Ok(())
+    }
+
+    /// Read global amount limits.
+    pub fn get_global_amount_limits(env: Env) -> Option<AmountLimits> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::GlobalAmountLimits)
+    }
+
+    /// Enforce amount limits: merchant-specific limits take precedence over global limits.
+    fn enforce_amount_limits(env: &Env, merchant_id: &Address, amount: i128) -> Result<(), Error> {
+        let limits: Option<AmountLimits> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantAmountLimits(merchant_id.clone()))
+            .or_else(|| {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::GlobalAmountLimits)
+            });
+
+        if let Some(l) = limits {
+            if let Some(min) = l.min {
+                if amount < min {
+                    return Err(Error::AmountBelowMin);
+                }
+            }
+            if let Some(max) = l.max {
+                if amount > max {
+                    return Err(Error::AmountAboveMax);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Allow or disallow a token address for use in payments (admin only).
+    pub fn allow_token(env: Env, admin: Address, token_address: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::AllowedToken(token_address), &true);
+        Ok(())
+    }
+
+    /// Returns true if the given token address is on the allowlist.
+    pub fn is_token_allowed(env: Env, token_address: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::AllowedToken(token_address))
+            .unwrap_or(false)
+    }
+
     #[allow(deprecated)]
     #[allow(clippy::too_many_arguments)]
     pub fn create_payment(
@@ -1049,9 +1177,14 @@ impl PaymentProcessor {
         amount: i128,
         currency: Symbol,
         deposit_address: Address,
-        expires_at: u64,
+        /// Absolute expiry timestamp (Unix seconds). When `None`, `duration_secs` is used.
+        expires_at: Option<u64>,
+        /// Seconds from now until the payment expires. Ignored when `expires_at` is `Some`.
+        /// Defaults to `DEFAULT_PAYMENT_DURATION_SECS` (1 hour) when both are `None`.
+        duration_secs: Option<u64>,
         memo: Option<String>,
         memo_type: Option<String>,
+        token_address: Option<Address>,
     ) -> Result<PaymentCharge, Error> {
         Self::require_not_paused(&env)?;
         merchant_id.require_auth();
@@ -1059,6 +1192,18 @@ impl PaymentProcessor {
         // Verify that the merchant has the MERCHANT role (granted on verification)
         if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
             return Err(Error::Unauthorized);
+        }
+
+        // Validate token: if provided it must be on the allowlist; if absent the default USDC token is used.
+        if let Some(ref token_addr) = token_address {
+            let allowed: bool = env
+                .storage()
+                .persistent()
+                .get::<DataKey, bool>(&DataKey::AllowedToken(token_addr.clone()))
+                .unwrap_or(false);
+            if !allowed {
+                return Err(Error::UnsupportedToken);
+            }
         }
 
         // Issue #79: Cross-contract validate merchant is verified and active
@@ -1087,6 +1232,8 @@ impl PaymentProcessor {
             return Err(Error::InvalidAmount);
         }
 
+        Self::enforce_amount_limits(&env, &merchant_id, amount)?;
+
         if env
             .storage()
             .persistent()
@@ -1101,6 +1248,17 @@ impl PaymentProcessor {
 
         Self::enforce_create_payment_rate_limit(&env, &merchant_id)?;
 
+        let now = env.ledger().timestamp();
+        let resolved_expires_at = match expires_at {
+            Some(ts) => ts,
+            None => now.saturating_add(
+                duration_secs.unwrap_or(DEFAULT_PAYMENT_DURATION_SECS),
+            ),
+        };
+        if resolved_expires_at <= now {
+            return Err(Error::InvalidExpiry);
+        }
+
         let payment = PaymentCharge {
             payment_id: payment_id.clone(),
             merchant_id: merchant_id.clone(),
@@ -1110,12 +1268,13 @@ impl PaymentProcessor {
             status: PaymentStatus::Pending,
             payer_address: None,
             transaction_hash: None,
-            created_at: env.ledger().timestamp(),
+            created_at: now,
             confirmed_at: None,
-            expires_at,
+            expires_at: resolved_expires_at,
             amount_received: None,
             memo: memo.clone(),
             memo_type: memo_type.clone(),
+            token_address: token_address.clone(),
         };
 
         env.storage()
@@ -1182,15 +1341,37 @@ impl PaymentProcessor {
         payment.transaction_hash = Some(transaction_hash);
         payment.confirmed_at = Some(env.ledger().timestamp());
 
+        // Scale tolerance by token decimals: 1 unit in the smallest denomination per decimal place.
+        // USDC has 7 decimals on Stellar (stroops); other tokens may differ.
+        // tolerance = 10^(decimals - 6) clamped to at least 1, so a 6-decimal token gets tolerance=1,
+        // a 7-decimal token gets tolerance=10, a 2-decimal token gets tolerance=1 (clamped).
+        let tolerance = if let Some(ref token_addr) = payment.token_address {
+            let decimals = token::TokenClient::new(&env, token_addr).decimals();
+            if decimals >= 6 {
+                let exp = (decimals - 6) as u32;
+                let mut t: i128 = 1;
+                let mut i = 0u32;
+                while i < exp {
+                    t *= 10;
+                    i += 1;
+                }
+                t
+            } else {
+                1i128
+            }
+        } else {
+            PAYMENT_TOLERANCE
+        };
+
         let diff = amount_received - payment.amount;
 
-        let new_status = if (0..=PAYMENT_TOLERANCE).contains(&diff) {
+        let new_status = if (0..=tolerance).contains(&diff) {
             // Exact match or tiny overpay within tolerance → Confirmed
             PaymentStatus::Confirmed
-        } else if diff > PAYMENT_TOLERANCE {
+        } else if diff > tolerance {
             // Meaningfully more than expected → Overpaid
             PaymentStatus::Overpaid
-        } else if diff >= -PAYMENT_TOLERANCE {
+        } else if diff >= -tolerance {
             // Tiny underpay within tolerance → Confirmed
             PaymentStatus::Confirmed
         } else {

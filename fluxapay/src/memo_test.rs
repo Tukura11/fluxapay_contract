@@ -34,9 +34,11 @@ fn test_create_payment_with_memo() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+        &None::<u64>,
         &memo,
-        &memo_type,
+            &memo_type,
+    &None::<Address>,
     );
 
     assert_eq!(payment.payment_id, payment_id);
@@ -63,9 +65,11 @@ fn test_create_payment_without_memo() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     assert_eq!(payment.payment_id, payment_id);
@@ -94,9 +98,11 @@ fn test_create_payment_with_id_memo() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+        &None::<u64>,
         &memo,
-        &memo_type,
+            &memo_type,
+    &None::<Address>,
     );
 
     assert_eq!(payment.memo, Some(String::from_str(&env, "123456789")));
@@ -124,9 +130,11 @@ fn test_create_payment_with_hash_memo() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+        &None::<u64>,
         &memo,
-        &memo_type,
+            &memo_type,
+    &None::<Address>,
     );
 
     assert_eq!(
@@ -157,9 +165,11 @@ fn test_memo_persists_after_verification() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+        &None::<u64>,
         &memo,
-        &memo_type,
+            &memo_type,
+    &None::<Address>,
     );
 
     // Verify payment

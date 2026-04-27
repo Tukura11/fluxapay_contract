@@ -50,9 +50,11 @@ fn test_create_dispute() {
         &amount,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     // Verify payment
@@ -107,9 +109,11 @@ fn test_review_dispute() {
         &amount,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let transaction_hash = BytesN::<32>::random(&env);
@@ -163,9 +167,11 @@ fn test_resolve_dispute_with_refund() {
         &amount,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let transaction_hash = BytesN::<32>::random(&env);
@@ -229,9 +235,11 @@ fn test_reject_dispute() {
         &amount,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let transaction_hash = BytesN::<32>::random(&env);
@@ -283,9 +291,11 @@ fn test_get_payment_disputes() {
         &amount,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let transaction_hash = BytesN::<32>::random(&env);
@@ -342,9 +352,11 @@ fn test_dispute_invalid_amount() {
         &amount,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     // Try to create dispute with invalid amount - should fail
@@ -382,9 +394,11 @@ fn test_resolve_dispute_with_only_operator_auth() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &merchant,
-        &(env.ledger().timestamp() + 3600),
+        &Some(env.ledger().timestamp() + 3600),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let oracle = Address::generate(&env);

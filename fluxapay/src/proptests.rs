@@ -87,9 +87,11 @@ proptest! {
             &amount,
             &Symbol::new(&env, "USDC"),
             &Address::generate(&env),
-            &expires_at,
+            &Some(expires_at),
+                        &None::<u64>,
+                        &None::<String>,
             &None::<String>,
-            &None::<String>,
+            &None::<Address>,
         );
 
         env.ledger().set_timestamp(expires_at + after_expiry);
@@ -131,9 +133,11 @@ proptest! {
             &amount,
             &Symbol::new(&env, "USDC"),
             &Address::generate(&env),
-            &expires_at,
+            &Some(expires_at),
+                        &None::<u64>,
+                        &None::<String>,
             &None::<String>,
-            &None::<String>,
+            &None::<Address>,
         );
 
         let status = client.verify_payment(

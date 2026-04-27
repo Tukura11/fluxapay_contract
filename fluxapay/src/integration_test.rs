@@ -72,9 +72,11 @@ fn test_happy_path_flow() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let tx_hash = BytesN::<32>::random(&env);
@@ -136,9 +138,11 @@ fn test_settlement_path() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &(env.ledger().timestamp() + 3600),
+        &Some(env.ledger().timestamp() + 3600),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let oracle = Address::generate(&env);
@@ -178,9 +182,11 @@ fn test_failure_and_expiration_path() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     // Jump forward in time

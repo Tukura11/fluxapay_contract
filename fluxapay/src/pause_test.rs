@@ -53,9 +53,11 @@ fn test_create_payment_when_paused() {
         &1000i128,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &(env.ledger().timestamp() + 3600),
+        &Some(env.ledger().timestamp() + 3600),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 }
 
@@ -77,9 +79,11 @@ fn test_verify_payment_when_paused() {
         &1000i128,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &(env.ledger().timestamp() + 3600),
+        &Some(env.ledger().timestamp() + 3600),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     // Pause the contract
@@ -115,9 +119,11 @@ fn test_cancel_payment_when_paused() {
         &1000i128,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &(env.ledger().timestamp() + 3600),
+        &Some(env.ledger().timestamp() + 3600),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     // Pause the contract
@@ -148,9 +154,11 @@ fn test_create_payment_after_unpause() {
         &1000i128,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &(env.ledger().timestamp() + 3600),
+        &Some(env.ledger().timestamp() + 3600),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     assert_eq!(payment.status, PaymentStatus::Pending);

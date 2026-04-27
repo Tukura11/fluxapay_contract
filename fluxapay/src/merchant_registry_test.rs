@@ -342,9 +342,11 @@ fn test_unverified_merchant_cannot_create_payment() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 }
 
@@ -396,9 +398,11 @@ fn test_verified_merchant_can_create_payment() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     assert_eq!(payment.payment_id, payment_id);

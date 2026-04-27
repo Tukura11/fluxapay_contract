@@ -52,9 +52,11 @@ fn test_create_payment() {
         &amount,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     assert_eq!(payment.payment_id, payment_id);
@@ -88,9 +90,11 @@ fn test_create_payment_rate_limit_enforced() {
             &100i128,
             &currency,
             &deposit_address,
-            &expires_at,
+            &Some(expires_at),
+                        &None::<u64>,
+                        &None::<String>,
             &None::<String>,
-            &None::<String>,
+            &None::<Address>,
         );
     }
 
@@ -101,9 +105,11 @@ fn test_create_payment_rate_limit_enforced() {
         &100i128,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     assert_eq!(overflow, Err(Ok(Error::RateLimitExceeded)));
@@ -127,9 +133,11 @@ fn test_verify_payment_success() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let payer_address = Address::generate(&env);
@@ -169,9 +177,11 @@ fn test_verify_payment_partially_paid() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let oracle = Address::generate(&env);
@@ -211,9 +221,11 @@ fn test_verify_payment_overpaid() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let oracle = Address::generate(&env);
@@ -253,9 +265,11 @@ fn test_verify_payment_within_tolerance() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let oracle = Address::generate(&env);
@@ -299,9 +313,11 @@ fn test_get_merchant_payments_index_and_pagination() {
         &100i128,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
     client.create_payment(
         &payment_id_2,
@@ -309,9 +325,11 @@ fn test_get_merchant_payments_index_and_pagination() {
         &200i128,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
     client.create_payment(
         &payment_id_3,
@@ -319,9 +337,11 @@ fn test_get_merchant_payments_index_and_pagination() {
         &300i128,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let all = client.get_merchant_payments(&merchant_id);
@@ -353,9 +373,11 @@ fn test_cancel_pending_success() {
         &500i128,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     // Set time to before expiry
@@ -392,9 +414,11 @@ fn test_cancel_fails_when_confirmed() {
         &amount,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let oracle = Address::generate(&env);
@@ -429,9 +453,11 @@ fn test_expiry_logic() {
         &500i128,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     // Set time to past expiry
@@ -469,9 +495,11 @@ fn test_unauthorized_cancel() {
         &500i128,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     let random_addr = Address::generate(&env);
@@ -496,9 +524,11 @@ fn test_expire_payment_after_deadline() {
         &500i128,
         &Symbol::new(&env, "USDC"),
         &Address::generate(&env),
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 
     env.ledger().set_timestamp(expires_at + 1);
@@ -718,9 +748,11 @@ fn test_create_payment_requires_auth() {
         &amount,
         &currency,
         &deposit_address,
-        &expires_at,
+        &Some(expires_at),
+                &None::<u64>,
+                &None::<String>,
         &None::<String>,
-        &None::<String>,
+        &None::<Address>,
     );
 }
 
@@ -929,4 +961,635 @@ fn test_cancel_refund_emits_event() {
     let topics = last.1;
     assert_eq!(topics.get(0).unwrap(), Symbol::new(&env, "REFUND").into_val(&env));
     assert_eq!(topics.get(1).unwrap(), Symbol::new(&env, "CANCELLED").into_val(&env));
+}
+
+// --- Payment expiry / duration tests ---
+
+#[test]
+fn test_create_payment_with_explicit_expires_at() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let expires_at = env.ledger().timestamp() + 7200; // 2 hours
+    let payment = client.create_payment(
+        &String::from_str(&env, "pay_explicit_expiry"),
+        &merchant_id,
+        &1000i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &Some(expires_at),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(payment.expires_at, expires_at);
+}
+
+#[test]
+fn test_create_payment_with_duration_secs() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let now = env.ledger().timestamp();
+    let duration = 1800u64; // 30 minutes
+    let payment = client.create_payment(
+        &String::from_str(&env, "pay_duration"),
+        &merchant_id,
+        &1000i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &None::<u64>,
+        &Some(duration),
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(payment.expires_at, now + duration);
+}
+
+#[test]
+fn test_create_payment_defaults_to_one_hour() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let now = env.ledger().timestamp();
+    let payment = client.create_payment(
+        &String::from_str(&env, "pay_default_expiry"),
+        &merchant_id,
+        &1000i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &None::<u64>,
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(payment.expires_at, now + DEFAULT_PAYMENT_DURATION_SECS);
+}
+
+#[test]
+fn test_create_payment_explicit_expires_at_overrides_duration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let explicit_ts = env.ledger().timestamp() + 9999;
+    let payment = client.create_payment(
+        &String::from_str(&env, "pay_explicit_wins"),
+        &merchant_id,
+        &1000i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &Some(explicit_ts),
+        &Some(60u64), // duration ignored when expires_at is Some
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(payment.expires_at, explicit_ts);
+}
+
+#[test]
+fn test_create_payment_past_expires_at_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let now = env.ledger().timestamp();
+    // expires_at in the past (or equal to now)
+    let result = client.try_create_payment(
+        &String::from_str(&env, "pay_past_expiry"),
+        &merchant_id,
+        &1000i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &Some(now), // now is not > now, so invalid
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidExpiry)));
+}
+
+#[test]
+fn test_create_payment_zero_duration_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let result = client.try_create_payment(
+        &String::from_str(&env, "pay_zero_duration"),
+        &merchant_id,
+        &1000i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &None::<u64>,
+        &Some(0u64), // 0 seconds → expires_at == now → invalid
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidExpiry)));
+}
+
+// --- Amount limits tests ---
+
+#[test]
+fn test_global_min_limit_blocks_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    client.set_global_amount_limits(&admin, &Some(500i128), &None::<i128>);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let result = client.try_create_payment(
+        &String::from_str(&env, "pay_below_global_min"),
+        &merchant_id,
+        &499i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(result, Err(Ok(Error::AmountBelowMin)));
+}
+
+#[test]
+fn test_global_max_limit_blocks_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    client.set_global_amount_limits(&admin, &None::<i128>, &Some(1000i128));
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let result = client.try_create_payment(
+        &String::from_str(&env, "pay_above_global_max"),
+        &merchant_id,
+        &1001i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(result, Err(Ok(Error::AmountAboveMax)));
+}
+
+#[test]
+fn test_global_limits_allow_payment_within_range() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    client.set_global_amount_limits(&admin, &Some(100i128), &Some(10_000i128));
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let payment = client.create_payment(
+        &String::from_str(&env, "pay_within_global"),
+        &merchant_id,
+        &5_000i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(payment.status, PaymentStatus::Pending);
+}
+
+#[test]
+fn test_merchant_limits_override_global_limits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    // Global: min 1000
+    client.set_global_amount_limits(&admin, &Some(1000i128), &None::<i128>);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    // Merchant-specific: min 10 (lower than global)
+    client.set_merchant_amount_limits(&merchant_id, &Some(10i128), &None::<i128>);
+
+    // 500 is below global min but above merchant min — should succeed
+    let payment = client.create_payment(
+        &String::from_str(&env, "pay_merchant_override"),
+        &merchant_id,
+        &500i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(payment.status, PaymentStatus::Pending);
+}
+
+#[test]
+fn test_merchant_max_limit_blocks_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    client.set_merchant_amount_limits(&merchant_id, &None::<i128>, &Some(200i128));
+
+    let result = client.try_create_payment(
+        &String::from_str(&env, "pay_above_merchant_max"),
+        &merchant_id,
+        &201i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+    assert_eq!(result, Err(Ok(Error::AmountAboveMax)));
+}
+
+#[test]
+fn test_set_merchant_limits_invalid_range_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    // min > max — must fail
+    let result = client.try_set_merchant_amount_limits(
+        &merchant_id,
+        &Some(1000i128),
+        &Some(500i128),
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn test_get_merchant_and_global_limits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    assert_eq!(client.get_global_amount_limits(), None);
+    assert_eq!(client.get_merchant_amount_limits(&merchant_id), None);
+
+    client.set_global_amount_limits(&admin, &Some(50i128), &Some(5000i128));
+    client.set_merchant_amount_limits(&merchant_id, &Some(100i128), &Some(2000i128));
+
+    let global = client.get_global_amount_limits().unwrap();
+    assert_eq!(global.min, Some(50i128));
+    assert_eq!(global.max, Some(5000i128));
+
+    let merchant = client.get_merchant_amount_limits(&merchant_id).unwrap();
+    assert_eq!(merchant.min, Some(100i128));
+    assert_eq!(merchant.max, Some(2000i128));
+}
+
+// --- Multi-asset payment tests ---
+
+#[test]
+fn test_create_payment_with_allowed_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let token_admin = Address::generate(&env);
+    let alt_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    // Allow the token
+    client.allow_token(&admin, &alt_token);
+    assert!(client.is_token_allowed(&alt_token));
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let payment_id = String::from_str(&env, "pay_alt_token");
+    let payment = client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &1000i128,
+        &Symbol::new(&env, "EURC"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &Some(alt_token.clone()),
+    );
+
+    assert_eq!(payment.token_address, Some(alt_token));
+    assert_eq!(payment.status, PaymentStatus::Pending);
+}
+
+#[test]
+fn test_create_payment_with_unlisted_token_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let token_admin = Address::generate(&env);
+    let unknown_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    // Do NOT allow the token
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let result = client.try_create_payment(
+        &String::from_str(&env, "pay_bad_token"),
+        &merchant_id,
+        &1000i128,
+        &Symbol::new(&env, "RAND"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &Some(unknown_token),
+    );
+
+    assert_eq!(result, Err(Ok(Error::UnsupportedToken)));
+}
+
+#[test]
+fn test_create_payment_no_token_address_uses_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let payment = client.create_payment(
+        &String::from_str(&env, "pay_default_token"),
+        &merchant_id,
+        &500i128,
+        &Symbol::new(&env, "USDC"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &None::<Address>,
+    );
+
+    assert_eq!(payment.token_address, None);
+    assert_eq!(payment.status, PaymentStatus::Pending);
+}
+
+#[test]
+fn test_verify_payment_decimal_aware_tolerance_7_decimals() {
+    // A token with 7 decimals should have tolerance = 10 (10^(7-6))
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let token_admin = Address::generate(&env);
+    let alt_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    // Stellar asset contracts report 7 decimals
+    client.allow_token(&admin, &alt_token);
+
+    let merchant_id = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    let payment_id = String::from_str(&env, "pay_7dec");
+    let amount = 1_000_000_0i128; // 1.0 in 7-decimal units
+    client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &amount,
+        &Symbol::new(&env, "EURC"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &Some(alt_token),
+    );
+
+    // Underpay by 10 (within 7-decimal tolerance of 10) → Confirmed
+    let status = client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &(amount - 10),
+    );
+    assert_eq!(status, PaymentStatus::Confirmed);
+}
+
+#[test]
+fn test_verify_payment_decimal_aware_tolerance_7_decimals_overpay() {
+    // Underpay by 11 (outside 7-decimal tolerance of 10) → PartiallyPaid
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let token_admin = Address::generate(&env);
+    let alt_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    client.allow_token(&admin, &alt_token);
+
+    let merchant_id = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    let payment_id = String::from_str(&env, "pay_7dec_partial");
+    let amount = 1_000_000_0i128;
+    client.create_payment(
+        &payment_id,
+        &merchant_id,
+        &amount,
+        &Symbol::new(&env, "EURC"),
+        &Address::generate(&env),
+        &Some(env.ledger().timestamp() + 3600),
+        &None::<u64>,
+        &None::<String>,
+        &None::<String>,
+        &Some(alt_token),
+    );
+
+    // Underpay by 11 → PartiallyPaid
+    let status = client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &(amount - 11),
+    );
+    assert_eq!(status, PaymentStatus::PartiallyPaid);
+}
+
+// --- Cumulative refund cap tests ---
+
+#[test]
+fn test_cumulative_refunds_exceed_payment_amount_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "pay_cumulative_1");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+    let payment_amount = 1000i128;
+
+    client.register_payment(&payment_id, &merchant_id, &payment_amount, &Symbol::new(&env, "USDC"));
+
+    // First refund: 600 — ok
+    client.create_refund(&payment_id, &600i128, &String::from_str(&env, "partial 1"), &requester);
+
+    // Second refund: 500 — 600 + 500 = 1100 > 1000 — must fail
+    let result = client.try_create_refund(
+        &payment_id,
+        &500i128,
+        &String::from_str(&env, "partial 2"),
+        &requester,
+    );
+    assert_eq!(result, Err(Ok(Error::RefundExceedsPayment)));
+}
+
+#[test]
+fn test_refund_exactly_equal_to_payment_amount_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "pay_exact_1");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+    let payment_amount = 1000i128;
+
+    client.register_payment(&payment_id, &merchant_id, &payment_amount, &Symbol::new(&env, "USDC"));
+
+    // Single refund equal to full payment amount — must succeed
+    let refund_id = client.create_refund(
+        &payment_id,
+        &payment_amount,
+        &String::from_str(&env, "full refund"),
+        &requester,
+    );
+    let refund = client.get_refund(&refund_id);
+    assert_eq!(refund.amount, payment_amount);
+    assert_eq!(refund.status, RefundStatus::Pending);
+}
+
+#[test]
+fn test_second_refund_after_full_refund_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "pay_full_then_extra");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+    let payment_amount = 1000i128;
+
+    client.register_payment(&payment_id, &merchant_id, &payment_amount, &Symbol::new(&env, "USDC"));
+
+    // Full refund — ok
+    client.create_refund(&payment_id, &payment_amount, &String::from_str(&env, "full"), &requester);
+
+    // Any additional refund — must fail
+    let result = client.try_create_refund(
+        &payment_id,
+        &1i128,
+        &String::from_str(&env, "extra"),
+        &requester,
+    );
+    assert_eq!(result, Err(Ok(Error::RefundExceedsPayment)));
+}
+
+#[test]
+fn test_rejected_refunds_not_counted_in_cumulative_total() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "pay_rejected_refund");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+    let payment_amount = 1000i128;
+
+    client.register_payment(&payment_id, &merchant_id, &payment_amount, &Symbol::new(&env, "USDC"));
+
+    // Create and reject a refund for 800
+    let refund_id = client.create_refund(
+        &payment_id,
+        &800i128,
+        &String::from_str(&env, "will be rejected"),
+        &requester,
+    );
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    client.reject_refund(&operator, &refund_id);
+
+    // A new refund for 1000 should succeed because the rejected one is excluded
+    let new_refund_id = client.create_refund(
+        &payment_id,
+        &payment_amount,
+        &String::from_str(&env, "after rejection"),
+        &requester,
+    );
+    let refund = client.get_refund(&new_refund_id);
+    assert_eq!(refund.amount, payment_amount);
+    assert_eq!(refund.status, RefundStatus::Pending);
 }
