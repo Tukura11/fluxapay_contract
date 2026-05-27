@@ -498,6 +498,144 @@ fn test_reinstate_merchant() {
 }
 
 #[test]
+fn test_automatic_suspension_recovery() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+
+    let reason = String::from_str(&env, "Fraudulent activity");
+    // Suspend with 1 second expiration
+    client.suspend_merchant(&admin, &merchant_id, &reason, &1);
+
+    // Advance ledger time past expiration
+    env.ledger().with_mut(|li| li.timestamp += 2);
+
+    // Get merchant - should be automatically reinstated
+    let merchant = client.get_merchant(&merchant_id);
+    assert!(merchant.active);
+    assert_eq!(merchant.suspension_reason, None);
+    assert_eq!(merchant.suspended_at, None);
+    assert_eq!(merchant.suspension_expires_at, None);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #3)")]
+fn test_payout_address_rotation_delay() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+
+    // Set initial payout address
+    let payout_addr1 = Address::generate(&env);
+    client.update_merchant(
+        &merchant_id,
+        &None,
+        &None,
+        &None,
+        &Some(payout_addr1.clone()),
+        &None,
+        &None,
+    );
+
+    // Try to update payout address again within 48 hours - should fail
+    let payout_addr2 = Address::generate(&env);
+    client.update_merchant(
+        &merchant_id,
+        &None,
+        &None,
+        &None,
+        &Some(payout_addr2.clone()),
+        &None,
+        &None,
+    );
+}
+
+#[test]
+fn test_payout_address_rotation_delay_success_after_48_hours() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+
+    // Set initial payout address
+    let payout_addr1 = Address::generate(&env);
+    client.update_merchant(
+        &merchant_id,
+        &None,
+        &None,
+        &None,
+        &Some(payout_addr1.clone()),
+        &None,
+        &None,
+    );
+
+    // Advance ledger time by 48 hours + 1 second
+    env.ledger().with_mut(|li| li.timestamp += 48 * 60 * 60 + 1);
+
+    // Now update payout address should succeed
+    let payout_addr2 = Address::generate(&env);
+    client.update_merchant(
+        &merchant_id,
+        &None,
+        &None,
+        &None,
+        &Some(payout_addr2.clone()),
+        &None,
+        &None,
+    );
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert_eq!(merchant.payout_address, Some(payout_addr2));
+}
+
+#[test]
 #[should_panic(expected = "HostError: Error(Contract, #3)")]
 fn test_suspend_merchant_unauthorized() {
     let env = Env::default();
@@ -1020,4 +1158,66 @@ fn test_full_merchant_lifecycle_with_all_features() {
     client.verify_merchant(&admin, &merchant_id);
     let verified_merchant = client.get_merchant(&merchant_id);
     assert_eq!(verified_merchant.kyc_tier, KycTier::Basic);
+}
+
+#[test]
+fn test_verify_merchant_with_oracle_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+
+    let signature = String::from_str(&env, "0x1234567890abcdef");
+    
+    // Verify merchant with oracle signature
+    client.verify_merchant(&admin, &merchant_id, &signature);
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert_eq!(merchant.oracle_signature, Some(signature));
+}
+
+#[test]
+fn test_set_kyc_tier_with_oracle_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+
+    let signature = String::from_str(&env, "0xabcdef1234567890");
+    
+    // Set KYC tier with oracle signature
+    client.set_kyc_tier(&admin, &merchant_id, &KycTier::Full, &signature);
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert_eq!(merchant.oracle_signature, Some(signature));
 }

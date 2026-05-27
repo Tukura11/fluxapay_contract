@@ -82,6 +82,9 @@ pub struct Merchant {
     pub created_at: u64,
     pub suspension_reason: Option<String>,
     pub suspended_at: Option<u64>,
+    pub suspension_expires_at: Option<u64>,
+    pub oracle_signature: Option<String>,
+    pub last_payout_change_at: Option<u64>,
     /// Custom fee configuration for this merchant.
     pub fee_config: MaybeFeeConfig,
     /// IPFS hash for content-addressable merchant metadata (issue #208)
@@ -219,7 +222,18 @@ impl MerchantRegistry {
                     return Err(MerchantError::PayoutAddressNotWhitelisted);
                 }
             }
+            
+            // Enforce 48-hour delay on payout address changes (issue #212)
+            let current_time = env.ledger().timestamp();
+            let forty_eight_hours = 48 * 60 * 60; // 48 hours in seconds
+            if let Some(last_change_time) = merchant.last_payout_change_at {
+                if current_time < last_change_time + forty_eight_hours {
+                    return Err(MerchantError::Unauthorized); // Reuse Unauthorized error or create new one
+                }
+            }
+            
             merchant.payout_address = Some(addr);
+            merchant.last_payout_change_at = Some(current_time);
         }
         if let Some(acct) = bank_account {
             merchant.bank_account = Some(acct);
@@ -241,16 +255,25 @@ impl MerchantRegistry {
     }
 
     /// Get merchant info
+    /// 
+    /// This function automatically reinstates merchants whose suspension has expired.
     pub fn get_merchant(env: Env, merchant_id: Address) -> Result<Merchant, MerchantError> {
-        Self::get_merchant_internal(&env, &merchant_id)
+        Self::get_merchant_internal(&env, &merchant_id);
     }
 
     /// Verify merchant (admin only) — sets KycTier::Basic for backward compatibility.
     /// If a RefundManager address is configured, also grants the MERCHANT role there.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `admin` - The admin address
+    /// * `merchant_id` - The merchant address to verify
+    /// * `oracle_signature` - Optional oracle signature for KYC verification
     pub fn verify_merchant(
         env: Env,
         admin: Address,
         merchant_id: Address,
+        oracle_signature: Option<String>,
     ) -> Result<(), MerchantError> {
         admin.require_auth();
 
@@ -266,6 +289,11 @@ impl MerchantRegistry {
 
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         merchant.kyc_tier = KycTier::Basic;
+        
+        // Store oracle signature if provided
+        if let Some(signature) = oracle_signature {
+            merchant.oracle_signature = Some(signature);
+        }
 
         env.storage()
             .persistent()
@@ -290,11 +318,19 @@ impl MerchantRegistry {
     }
 
     /// Set a specific KYC tier for a merchant (admin only).
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `admin` - The admin address
+    /// * `merchant_id` - The merchant address to update
+    /// * `tier` - The KYC tier to set
+    /// * `oracle_signature` - Optional oracle signature for KYC verification
     pub fn set_kyc_tier(
         env: Env,
         admin: Address,
         merchant_id: Address,
         tier: KycTier,
+        oracle_signature: Option<String>,
     ) -> Result<(), MerchantError> {
         admin.require_auth();
 
@@ -310,6 +346,11 @@ impl MerchantRegistry {
 
         let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
         merchant.kyc_tier = tier;
+        
+        // Store oracle signature if provided
+        if let Some(signature) = oracle_signature {
+            merchant.oracle_signature = Some(signature);
+        }
 
         env.storage()
             .persistent()
@@ -344,11 +385,19 @@ impl MerchantRegistry {
     }
 
     /// Suspend a merchant (admin only)
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `admin` - The admin address
+    /// * `merchant_id` - The merchant address to suspend
+    /// * `reason` - The reason for suspension
+    /// * `expiration_duration` - Duration in seconds after which suspension auto-lifts
     pub fn suspend_merchant(
         env: Env,
         admin: Address,
         merchant_id: Address,
         reason: String,
+        expiration_duration: u64,
     ) -> Result<(), MerchantError> {
         admin.require_auth();
 
@@ -366,6 +415,7 @@ impl MerchantRegistry {
         merchant.active = false;
         merchant.suspension_reason = Some(reason);
         merchant.suspended_at = Some(env.ledger().timestamp());
+        merchant.suspension_expires_at = Some(env.ledger().timestamp() + expiration_duration);
 
         env.storage()
             .persistent()
@@ -383,6 +433,11 @@ impl MerchantRegistry {
     }
 
     /// Reinstate a suspended merchant (admin only)
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `admin` - The admin address
+    /// * `merchant_id` - The merchant address to reinstate
     pub fn reinstate_merchant(
         env: Env,
         admin: Address,
@@ -404,6 +459,7 @@ impl MerchantRegistry {
         merchant.active = true;
         merchant.suspension_reason = None;
         merchant.suspended_at = None;
+        merchant.suspension_expires_at = None;
 
         env.storage()
             .persistent()
@@ -547,10 +603,32 @@ impl MerchantRegistry {
     }
 
     fn get_merchant_internal(env: &Env, merchant_id: &Address) -> Result<Merchant, MerchantError> {
-        env.storage()
+        let mut merchant = env
+            .storage()
             .persistent()
             .get(&MerchantDataKey::Merchant(merchant_id.clone()))
-            .ok_or(MerchantError::MerchantNotFound)
+            .ok_or(MerchantError::MerchantNotFound)?;
+
+        // Auto-recover expired suspensions
+        if !merchant.active && merchant.suspension_expires_at.is_some() {
+            let current_time = env.ledger().timestamp();
+            if let Some(expiration_time) = merchant.suspension_expires_at {
+                if current_time >= expiration_time {
+                    // Auto-reinstate expired suspension
+                    merchant.active = true;
+                    merchant.suspension_reason = None;
+                    merchant.suspended_at = None;
+                    merchant.suspension_expires_at = None;
+
+                    // Save the updated merchant state
+                    env.storage()
+                        .persistent()
+                        .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
+                }
+            }
+        }
+
+        Ok(merchant)
     }
 
     /// Set IPFS metadata hash for merchant profile (issue #208)

@@ -42,6 +42,21 @@ impl DexRouter {
     /// path: array of token addresses [token_in, token_out]
     /// to: address to receive output tokens
     /// deadline: Unix timestamp after which the swap reverts
+    /// Swap exact tokens for tokens.
+    /// 
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `amount_in` - Exact amount of input tokens to spend
+    /// * `amount_out_min` - Minimum amount of output tokens required
+    /// * `path` - Array of token addresses [token_in, token_out]
+    /// * `to` - Address to receive output tokens
+    /// * `deadline` - Unix timestamp after which the swap reverts
+    /// 
+    /// # Returns
+    /// Vector of amounts representing the output at each hop
+    /// 
+    /// # Errors
+    /// Returns an error if the actual output falls below `amount_out_min`
     pub fn swap_exact_tokens_for_tokens(
         env: Env,
         amount_in: i128,
@@ -49,19 +64,36 @@ impl DexRouter {
         path: Vec<Address>,
         to: Address,
         deadline: u64,
-    ) -> Vec<i128> {
+    ) -> Result<Vec<i128>, &'static str> {
         // In a real implementation, this would:
         // 1. Transfer input tokens from caller to router
         // 2. Call router's swapExactTokensForTokens
         // 3. Transfer output tokens to 'to' address
         // 4. Return the amounts swapped
 
-        // Emit SWAP/EXECUTED event
-        soroban_sdk::Symbol::new(&env, "SWAP");
-        soroban_sdk::Symbol::new(&env, "EXECUTED");
+        // Get the expected output amounts
+        let amounts = Self::get_amounts_out(env.clone(), amount_in, path.clone());
+        
+        // Check if we have at least one output amount
+        if amounts.len() == 0 {
+            return Err("No output amounts calculated");
+        }
+        
+        // Get the final output amount (last element in the amounts vector)
+        let final_output = amounts.get(amounts.len() - 1).unwrap_or(&0);
+        
+        // Revert if output falls below amount_out_min (issue #217)
+        if *final_output < amount_out_min {
+            return Err("Slippage protection triggered: output is below minimum required");
+        }
 
-        let _ = (amount_out_min, to, deadline);
-        Self::get_amounts_out(env, amount_in, path)
+        // Emit SWAP/EXECUTED event
+        env.events().publish(
+            (soroban_sdk::Symbol::new(&env, "SWAP"), soroban_sdk::Symbol::new(&env, "EXECUTED")),
+            (amount_in, *final_output, to, deadline),
+        );
+
+        Ok(amounts)
     }
 
     /// Swap tokens for exact tokens.
