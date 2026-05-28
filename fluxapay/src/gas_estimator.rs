@@ -89,8 +89,8 @@ mod writes {
     pub const REJECT_REFUND: u32 = 2;
     pub const CANCEL_REFUND: u32 = 2;
     pub const CREATE_DISPUTE: u32 = 4;
-    pub const RESOLVE_DISPUTE: u32 = 6; // dispute + refund writes
-    pub const REJECT_DISPUTE: u32 = 2;
+    pub const RESOLVE_DISPUTE: u32 = 7; // dispute + refund writes + operator note
+    pub const REJECT_DISPUTE: u32 = 3;  // dispute write + operator note + TTL
     pub const SWAP_AND_PAY: u32 = 6;
     pub const CREATE_STREAM: u32 = 3;
     pub const WITHDRAW_STREAM: u32 = 2;
@@ -109,8 +109,8 @@ mod events {
     pub const REJECT_REFUND: u32 = 1;
     pub const CANCEL_REFUND: u32 = 1;
     pub const CREATE_DISPUTE: u32 = 1;
-    pub const RESOLVE_DISPUTE: u32 = 2; // REFUND/COMPLETED + DISPUTE/RESOLVED
-    pub const REJECT_DISPUTE: u32 = 1;
+    pub const RESOLVE_DISPUTE: u32 = 3; // REFUND/COMPLETED + DISPUTE/OPERATOR_NOTE + DISPUTE/RESOLVED
+    pub const REJECT_DISPUTE: u32 = 2;  // DISPUTE/OPERATOR_NOTE + DISPUTE/REJECTED
     pub const SWAP_AND_PAY: u32 = 2; // SWAP/AND/PAY + PAYMENT/CREATED
     pub const CREATE_STREAM: u32 = 1;
     pub const WITHDRAW_STREAM: u32 = 1;

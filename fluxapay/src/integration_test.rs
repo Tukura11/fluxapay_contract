@@ -108,6 +108,7 @@ fn test_happy_path_flow() {
         &operator,
         &dispute_id,
         &String::from_str(&env, "Refund approved"),
+        &String::from_str(&env, "base64sig=="),
     );
 
     let dispute_info = refund_client.get_dispute(&dispute_id);
@@ -231,6 +232,7 @@ fn test_failure_and_expiration_path() {
         &operator,
         &dispute_id,
         &String::from_str(&env, "Payment already expired and cancelled"),
+        &String::from_str(&env, "base64sig=="),
     );
 
     let dispute_info = refund_client.get_dispute(&dispute_id);
