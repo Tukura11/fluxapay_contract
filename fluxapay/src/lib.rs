@@ -1729,6 +1729,59 @@ impl RefundManager {
         Ok(())
     }
 
+    /// Submit usage metrics for a metered subscription.
+    ///
+    /// Operators call this to record usage units consumed since the last
+    /// billing cycle. The subscription amount is scaled by
+    /// `units_used * unit_price` and charged immediately via `charge_subscription`.
+    ///
+    /// # Parameters
+    /// * `operator`         – Must hold oracle or settlement_operator role.
+    /// * `subscription_id`  – Target subscription.
+    /// * `units_used`       – Number of usage units consumed this period.
+    /// * `unit_price`       – Price per unit in the subscription token's smallest unit.
+    /// * `token`            – Token contract address used for the charge.
+    pub fn submit_usage_metrics(
+        env: Env,
+        operator: Address,
+        subscription_id: String,
+        units_used: i128,
+        unit_price: i128,
+        token: Address,
+    ) -> Result<SubscriptionStatus, Error> {
+        operator.require_auth();
+
+        if !AccessControl::has_role(&env, &role_oracle(&env), &operator)
+            && !AccessControl::has_role(&env, &role_settlement_operator(&env), &operator)
+        {
+            return Err(Error::Unauthorized);
+        }
+
+        if units_used <= 0 || unit_price <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let mut subscription = Self::get_subscription_internal(&env, &subscription_id)?;
+
+        // Override the subscription amount with the metered charge for this cycle.
+        let metered_amount = units_used.saturating_mul(unit_price);
+        subscription.amount = metered_amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(subscription_id.clone()), &subscription);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "SUBSCRIPTION"),
+                Symbol::new(&env, "USAGE_RECORDED"),
+            ),
+            (subscription_id.clone(), units_used, unit_price, metered_amount),
+        );
+
+        // Trigger the charge at the updated metered amount.
+        Self::charge_subscription(env, operator, subscription_id, token)
+    }
+
     /// Process due subscriptions - called by an operator or oracle
     pub fn process_due_subscriptions(env: Env, operator: Address) -> Result<u32, Error> {
         operator.require_auth();
@@ -2977,6 +3030,21 @@ impl PaymentProcessor {
         top_ups: Vec<(String, i128)>,
     ) -> Result<(), StreamError> {
         PaymentStreaming::top_up_multiple_streams(env, sender, top_ups)
+    }
+
+    /// Update the flow rate of an active stream (increase or decrease).
+    pub fn update_stream_rate(
+        env: Env,
+        sender: Address,
+        stream_id: String,
+        new_rate: i128,
+    ) -> Result<(), StreamError> {
+        PaymentStreaming::update_stream_rate(env, sender, stream_id, new_rate)
+    }
+
+    /// Close a terminal (Exhausted/Cancelled) stream and remove its storage entry.
+    pub fn close_expired_stream(env: Env, stream_id: String) -> Result<(), StreamError> {
+        PaymentStreaming::close_expired_stream(env, stream_id)
     }
 }
 

@@ -860,6 +860,149 @@ impl PaymentStreaming {
         Ok(cancelled)
     }
 
+    // ─── Dynamic rate adjustment ──────────────────────────────────────────────
+
+    /// Update the flow rate of an active stream (increase or decrease).
+    ///
+    /// Unlike `decrease_rate_per_second`, this function allows both increases
+    /// and decreases. Accrued tokens are check-pointed at the current rate
+    /// before the new rate takes effect.
+    ///
+    /// When the rate is **decreased**, any surplus deposit is refunded to the
+    /// sender (same logic as `decrease_rate_per_second`).
+    /// When the rate is **increased**, no additional deposit is required; the
+    /// existing deposit simply drains faster.
+    ///
+    /// # Parameters
+    /// * `sender`    – Must be the original stream sender; must sign.
+    /// * `stream_id` – Stream to update.
+    /// * `new_rate`  – New flow rate (must be > 0).
+    pub fn update_stream_rate(
+        env: Env,
+        sender: Address,
+        stream_id: String,
+        new_rate: i128,
+    ) -> Result<(), StreamError> {
+        sender.require_auth();
+        require_not_paused(&env)?;
+
+        let mut stream: PaymentStream = env
+            .storage()
+            .persistent()
+            .get(&StreamDataKey::Stream(stream_id.clone()))
+            .ok_or(StreamError::StreamNotFound)?;
+
+        if stream.sender != sender {
+            return Err(StreamError::Unauthorized);
+        }
+        if stream.status != StreamStatus::Active {
+            return Err(StreamError::StreamNotActive);
+        }
+        if new_rate <= 0 {
+            return Err(StreamError::InvalidRate);
+        }
+
+        let now = env.ledger().timestamp();
+        let old_rate = stream.rate_per_second;
+
+        // Checkpoint accrued amount at the old rate.
+        let elapsed = now.saturating_sub(stream.last_checkpoint_at);
+        let newly_accrued = (elapsed as i128)
+            .saturating_mul(old_rate)
+            .min(stream.remaining_deposit - stream.accrued_at_checkpoint);
+        stream.accrued_at_checkpoint = stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+        stream.last_checkpoint_at = now;
+
+        // When decreasing: refund surplus deposit no longer needed at the new rate.
+        let surplus = if new_rate < old_rate {
+            let remaining_unlocked = stream
+                .remaining_deposit
+                .saturating_sub(stream.accrued_at_checkpoint);
+            if remaining_unlocked > 0 && old_rate > 0 {
+                let old_seconds_left = remaining_unlocked / old_rate;
+                let new_needed = old_seconds_left.saturating_mul(new_rate);
+                remaining_unlocked.saturating_sub(new_needed).max(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        stream.rate_per_second = new_rate;
+        stream.remaining_deposit = stream.remaining_deposit.saturating_sub(surplus);
+
+        // Persist before interaction (CEI pattern).
+        env.storage()
+            .persistent()
+            .set(&StreamDataKey::Stream(stream_id.clone()), &stream);
+
+        if surplus > 0 {
+            let token_client = token::Client::new(&env, &stream.token);
+            token_client.transfer(&env.current_contract_address(), &stream.sender, &surplus);
+        }
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "STREAM"),
+                Symbol::new(&env, "RATE_UPDATED"),
+                stream_id,
+            ),
+            (sender, old_rate, new_rate, surplus),
+        );
+
+        Ok(())
+    }
+
+    // ─── Expired stream cleanup ───────────────────────────────────────────────
+
+    /// Close an exhausted or cancelled stream and remove its storage entry.
+    ///
+    /// This releases the contract storage slot for streams that have already
+    /// reached a terminal state (`Exhausted` or `Cancelled`). Any remaining
+    /// accrued balance is paid out to the receiver before the key is removed.
+    ///
+    /// Can be called by anyone (permissionless) once the stream is terminal,
+    /// incentivising keepers to clean up storage.
+    ///
+    /// # Parameters
+    /// * `stream_id` – Stream to close and remove.
+    pub fn close_expired_stream(env: Env, stream_id: String) -> Result<(), StreamError> {
+        let stream: PaymentStream = env
+            .storage()
+            .persistent()
+            .get(&StreamDataKey::Stream(stream_id.clone()))
+            .ok_or(StreamError::StreamNotFound)?;
+
+        // Only terminal streams may be cleaned up.
+        if stream.status == StreamStatus::Active {
+            return Err(StreamError::StreamNotActive);
+        }
+
+        // Pay out any residual accrued balance to the receiver.
+        let residual = stream.accrued_at_checkpoint.min(stream.remaining_deposit).max(0);
+        if residual > 0 {
+            let token_client = token::Client::new(&env, &stream.token);
+            token_client.transfer(&env.current_contract_address(), &stream.receiver, &residual);
+        }
+
+        // Remove the storage entry to reclaim ledger space.
+        env.storage()
+            .persistent()
+            .remove(&StreamDataKey::Stream(stream_id.clone()));
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "STREAM"),
+                Symbol::new(&env, "CLOSED"),
+                stream_id,
+            ),
+            (stream.sender, stream.receiver, residual),
+        );
+
+        Ok(())
+    }
+
     // ─── Batch withdrawal ─────────────────────────────────────────────────────
 
     /// Withdraw accrued amounts from multiple streams to specified destinations
