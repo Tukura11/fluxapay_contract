@@ -173,8 +173,13 @@ fn test_resolve_dispute_with_refund() {
 
     // Resolve dispute with refund
     let resolution_notes = String::from_str(&env, "Dispute valid, issuing full refund");
-    let refund_id =
-        refund_client.resolve_dispute_with_refund(&operator, &dispute_id, &resolution_notes);
+    let operator_sig = String::from_str(&env, "base64sig==");
+    let refund_id = refund_client.resolve_dispute_with_refund(
+        &operator,
+        &dispute_id,
+        &resolution_notes,
+        &operator_sig,
+    );
 
     // Verify dispute was resolved
     let dispute: Dispute = refund_client.get_dispute(&dispute_id);
@@ -228,7 +233,8 @@ fn test_reject_dispute() {
 
     // Reject dispute
     let resolution_notes = String::from_str(&env, "Insufficient evidence, dispute rejected");
-    refund_client.reject_dispute(&operator, &dispute_id, &resolution_notes);
+    let operator_sig = String::from_str(&env, "base64sig==");
+    refund_client.reject_dispute(&operator, &dispute_id, &resolution_notes, &operator_sig);
 
     // Verify dispute was rejected
     let dispute: Dispute = refund_client.get_dispute(&dispute_id);
@@ -352,6 +358,7 @@ fn test_resolve_dispute_with_only_operator_auth() {
         &operator,
         &dispute_id,
         &String::from_str(&env, "Refund approved"),
+        &String::from_str(&env, "base64sig=="),
     );
 
     // Verify the auth invocations: only the operator should have been required

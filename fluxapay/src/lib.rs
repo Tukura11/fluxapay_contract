@@ -13,12 +13,18 @@ const CREATE_PAYMENT_WINDOW_SECS: u64 = 60;
 const CREATE_PAYMENT_MAX_PER_WINDOW: u32 = 30;
 pub const DEFAULT_PAYMENT_DURATION_SECS: u64 = 3_600;
 const REFUND_FEE_BPS: i128 = 100;
+
+/// Maximum number of payment retries before a subscription is cancelled.
+pub const SUBSCRIPTION_MAX_RETRIES: u32 = 3;
+/// Spacing between retry attempts in seconds (2 days).
+pub const SUBSCRIPTION_RETRY_INTERVAL_SECS: u64 = 2 * 24 * 60 * 60;
 pub(crate) const ZERO_CONTRACT_STRKEY: &str =
     "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
 mod access_control;
 mod dex_router;
 pub mod fx_oracle;
+pub mod merchant_auth;
 use access_control::{
     role_admin, role_merchant, role_oracle, role_settlement_operator, AccessControl,
 };
@@ -27,6 +33,9 @@ use access_control::{
 pub use access_control::AccessControlDataKey;
 pub use dex_router::{DexRouter, DexRouterClient};
 pub use fx_oracle::{FXOracle, FXOracleClient, FXOracleError};
+pub use merchant_auth::{
+    MerchantAuthError, MerchantAuthorization, MerchantPreAuth,
+};
 
 #[contract]
 pub struct PaymentProcessor;
@@ -154,6 +163,14 @@ pub enum Error {
     SwapPathInvalid = 28,
     /// DEX quoted swap output deviates from the oracle reference price.
     OraclePriceDeviation = 29,
+    /// Subscription is in a grace period; payment will be retried.
+    SubscriptionInGracePeriod = 30,
+    /// Subscription has exhausted all retries and is now cancelled.
+    SubscriptionRetryExhausted = 31,
+    /// The provided resume timestamp is in the past or invalid.
+    InvalidResumeTimestamp = 32,
+    /// Merchant authorization error (see MerchantAuthError for details).
+    MerchantAuthError = 33,
 }
 
 #[contracttype]
@@ -233,6 +250,26 @@ pub struct SettlementSplit {
     pub amount: i128,
 }
 
+/// Operator note persisted on-chain for dispute transparency.
+///
+/// Stored under `DataKey::DisputeOperatorNote(dispute_id)` and emitted
+/// in full via the `DISPUTE / OPERATOR_NOTE` event so that off-chain
+/// indexers can reconstruct the complete audit trail.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeOperatorNote {
+    /// The dispute this note belongs to.
+    pub dispute_id: String,
+    /// Operator address that authored the note.
+    pub operator: Address,
+    /// Full resolution notes text.
+    pub resolution_notes: String,
+    /// Operator-provided signature (e.g. base64-encoded Ed25519 sig over the note hash).
+    pub operator_signature: String,
+    /// Ledger timestamp when the note was recorded.
+    pub recorded_at: u64,
+}
+
 /// Configuration for creating a payment.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -274,6 +311,13 @@ pub struct Subscription {
     pub last_payment_at: Option<u64>,
     pub total_payments: u32,
     pub max_payments: Option<u32>,
+    /// Number of consecutive failed payment attempts in the current grace period.
+    pub retry_count: u32,
+    /// Timestamp of the next retry attempt (set when a payment fails and grace period begins).
+    pub next_retry_at: Option<u64>,
+    /// When set, the subscription will automatically resume at this timestamp.
+    /// Only meaningful when `status == Paused`.
+    pub resume_at: Option<u64>,
 }
 
 #[contracttype]
@@ -322,6 +366,8 @@ pub enum DataKey {
     PayerSubscriptions(Address),
     SubscriptionCounter,
     StreamCounter,
+    /// Stores operator notes keyed by dispute_id for on-chain transparency.
+    DisputeOperatorNote(String),
 }
 
 // When building for WASM deployment, only the active contract's #[contractimpl]
@@ -940,6 +986,7 @@ impl RefundManager {
         operator: Address,
         dispute_id: String,
         resolution_notes: String,
+        operator_signature: String,
     ) -> Result<String, Error> {
         operator.require_auth();
 
@@ -971,10 +1018,43 @@ impl RefundManager {
         // Process the refund immediately
         Self::process_refund_internal(&env, &operator, refund_id.clone())?;
 
+        let now = env.ledger().timestamp();
+
+        // Persist operator note on-chain for full transparency.
+        let note = DisputeOperatorNote {
+            dispute_id: dispute_id.clone(),
+            operator: operator.clone(),
+            resolution_notes: resolution_notes.clone(),
+            operator_signature: operator_signature.clone(),
+            recorded_at: now,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeOperatorNote(dispute_id.clone()), &note);
+        Self::bump_ttl(
+            &env,
+            &DataKey::DisputeOperatorNote(dispute_id.clone()),
+            LONG_LIVE_TTL,
+        );
+
+        // Emit full note + signature so off-chain indexers have the complete record.
+        env.events().publish(
+            (
+                Symbol::new(&env, "DISPUTE"),
+                Symbol::new(&env, "OPERATOR_NOTE"),
+            ),
+            (
+                dispute_id.clone(),
+                operator.clone(),
+                resolution_notes.clone(),
+                operator_signature,
+            ),
+        );
+
         // Update dispute status
         dispute.status = DisputeStatus::Resolved;
         dispute.refund_id = Some(refund_id.clone());
-        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolved_at = Some(now);
         dispute.resolution_notes = Some(resolution_notes);
 
         env.storage()
@@ -982,7 +1062,7 @@ impl RefundManager {
             .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
-        // Issue #27: emit DISPUTE_RESOLVED event
+        // Emit DISPUTE_RESOLVED event
         env.events().publish(
             (Symbol::new(&env, "DISPUTE"), Symbol::new(&env, "RESOLVED")),
             (dispute_id, dispute.payment_id),
@@ -996,6 +1076,7 @@ impl RefundManager {
         operator: Address,
         dispute_id: String,
         resolution_notes: String,
+        operator_signature: String,
     ) -> Result<(), Error> {
         operator.require_auth();
 
@@ -1013,8 +1094,41 @@ impl RefundManager {
             return Err(Error::DisputeAlreadyResolved);
         }
 
+        let now = env.ledger().timestamp();
+
+        // Persist operator note on-chain for full transparency.
+        let note = DisputeOperatorNote {
+            dispute_id: dispute_id.clone(),
+            operator: operator.clone(),
+            resolution_notes: resolution_notes.clone(),
+            operator_signature: operator_signature.clone(),
+            recorded_at: now,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeOperatorNote(dispute_id.clone()), &note);
+        Self::bump_ttl(
+            &env,
+            &DataKey::DisputeOperatorNote(dispute_id.clone()),
+            LONG_LIVE_TTL,
+        );
+
+        // Emit full note + signature so off-chain indexers have the complete record.
+        env.events().publish(
+            (
+                Symbol::new(&env, "DISPUTE"),
+                Symbol::new(&env, "OPERATOR_NOTE"),
+            ),
+            (
+                dispute_id.clone(),
+                operator.clone(),
+                resolution_notes.clone(),
+                operator_signature,
+            ),
+        );
+
         dispute.status = DisputeStatus::Rejected;
-        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolved_at = Some(now);
         dispute.resolution_notes = Some(resolution_notes);
 
         env.storage()
@@ -1022,13 +1136,24 @@ impl RefundManager {
             .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
 
-        // Issue #27: emit DISPUTE_REJECTED event
+        // Emit DISPUTE_REJECTED event
         env.events().publish(
             (Symbol::new(&env, "DISPUTE"), Symbol::new(&env, "REJECTED")),
             (dispute_id, dispute.payment_id),
         );
 
         Ok(())
+    }
+
+    /// Retrieve the persisted operator note for a dispute.
+    pub fn get_dispute_operator_note(
+        env: Env,
+        dispute_id: String,
+    ) -> Result<DisputeOperatorNote, Error> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeOperatorNote(dispute_id))
+            .ok_or(Error::DisputeNotFound)
     }
 
     pub fn get_dispute(env: Env, dispute_id: String) -> Result<Dispute, Error> {
@@ -1188,6 +1313,9 @@ impl RefundManager {
             last_payment_at: None,
             total_payments: 0,
             max_payments,
+            retry_count: 0,
+            next_retry_at: None,
+            resume_at: None,
         };
 
         env.storage().persistent().set(
@@ -1251,6 +1379,233 @@ impl RefundManager {
             .set(&DataKey::Subscription(subscription_id), &subscription);
 
         Ok(())
+    }
+
+    /// Pause a subscription until a specific timestamp, after which it
+    /// automatically resumes on the next `charge_subscription` call.
+    ///
+    /// # Parameters
+    /// * `payer`           – Must be the subscription owner; must sign.
+    /// * `subscription_id` – Subscription to pause.
+    /// * `resume_timestamp`– Unix timestamp at which the subscription should
+    ///                       resume. Must be strictly in the future.
+    pub fn pause_subscription_with_resume_date(
+        env: Env,
+        payer: Address,
+        subscription_id: String,
+        resume_timestamp: u64,
+    ) -> Result<(), Error> {
+        payer.require_auth();
+
+        let now = env.ledger().timestamp();
+        if resume_timestamp <= now {
+            return Err(Error::InvalidResumeTimestamp);
+        }
+
+        let mut subscription = Self::get_subscription_internal(&env, &subscription_id)?;
+
+        if subscription.payer_address != payer {
+            return Err(Error::Unauthorized);
+        }
+
+        if subscription.status != SubscriptionStatus::Active {
+            return Err(Error::PaymentAlreadyProcessed);
+        }
+
+        subscription.status = SubscriptionStatus::Paused;
+        subscription.resume_at = Some(resume_timestamp);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(subscription_id.clone()), &subscription);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "SUBSCRIPTION"),
+                Symbol::new(&env, "PAUSED"),
+            ),
+            (subscription_id, payer, resume_timestamp),
+        );
+
+        Ok(())
+    }
+
+    /// Attempt to charge a subscription.
+    ///
+    /// Handles the full lifecycle including:
+    /// - Auto-resuming a paused subscription whose `resume_at` has passed.
+    /// - Pulling the due amount via a pre-authorization (if one exists) or
+    ///   directly via the token contract.
+    /// - On insufficient balance: entering a grace period with up to
+    ///   `SUBSCRIPTION_MAX_RETRIES` retries spaced `SUBSCRIPTION_RETRY_INTERVAL_SECS`
+    ///   apart before marking the subscription as `Cancelled`.
+    ///
+    /// # Parameters
+    /// * `operator`        – Oracle or settlement operator; must sign.
+    /// * `subscription_id` – Subscription to charge.
+    /// * `token`           – Token contract to pull payment from.
+    pub fn charge_subscription(
+        env: Env,
+        operator: Address,
+        subscription_id: String,
+        token: Address,
+    ) -> Result<SubscriptionStatus, Error> {
+        operator.require_auth();
+
+        if !AccessControl::has_role(&env, &role_oracle(&env), &operator)
+            && !AccessControl::has_role(&env, &role_settlement_operator(&env), &operator)
+        {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut subscription = Self::get_subscription_internal(&env, &subscription_id)?;
+        let now = env.ledger().timestamp();
+
+        // ── Auto-resume if the pause window has expired ───────────────────────
+        if subscription.status == SubscriptionStatus::Paused {
+            if let Some(resume_at) = subscription.resume_at {
+                if now >= resume_at {
+                    subscription.status = SubscriptionStatus::Active;
+                    subscription.resume_at = None;
+                    // Push next payment forward from the resume point.
+                    subscription.next_payment_at =
+                        resume_at.saturating_add(subscription.interval_secs);
+
+                    env.events().publish(
+                        (
+                            Symbol::new(&env, "SUBSCRIPTION"),
+                            Symbol::new(&env, "RESUMED"),
+                        ),
+                        (subscription_id.clone(), subscription.payer_address.clone()),
+                    );
+                }
+            }
+        }
+
+        // Only charge Active subscriptions.
+        if subscription.status != SubscriptionStatus::Active {
+            env.storage().persistent().set(
+                &DataKey::Subscription(subscription_id.clone()),
+                &subscription,
+            );
+            return Ok(subscription.status);
+        }
+
+        // Check whether we are in a retry window or a normal due-date window.
+        let is_retry = subscription.next_retry_at.is_some();
+        let due = if is_retry {
+            subscription.next_retry_at.unwrap_or(0)
+        } else {
+            subscription.next_payment_at
+        };
+
+        if now < due {
+            // Not yet due — nothing to do.
+            env.storage().persistent().set(
+                &DataKey::Subscription(subscription_id.clone()),
+                &subscription,
+            );
+            return Ok(subscription.status);
+        }
+
+        // ── Attempt token transfer ────────────────────────────────────────────
+        let token_client = token::Client::new(&env, &token);
+        let payer = subscription.payer_address.clone();
+        let merchant = subscription.merchant_id.clone();
+        let amount = subscription.amount;
+
+        let transfer_ok = token_client
+            .try_transfer(&payer, &merchant, &amount)
+            .is_ok();
+
+        if transfer_ok {
+            // ── Success path ──────────────────────────────────────────────────
+            subscription.last_payment_at = Some(now);
+            subscription.total_payments = subscription.total_payments.saturating_add(1);
+            subscription.retry_count = 0;
+            subscription.next_retry_at = None;
+            subscription.next_payment_at = now.saturating_add(subscription.interval_secs);
+
+            // Check max_payments cap.
+            if let Some(max) = subscription.max_payments {
+                if subscription.total_payments >= max {
+                    subscription.status = SubscriptionStatus::Expired;
+                }
+            }
+
+            env.storage().persistent().set(
+                &DataKey::Subscription(subscription_id.clone()),
+                &subscription,
+            );
+
+            env.events().publish(
+                (
+                    Symbol::new(&env, "SUBSCRIPTION"),
+                    Symbol::new(&env, "CHARGED"),
+                ),
+                (
+                    subscription_id,
+                    payer,
+                    merchant,
+                    amount,
+                    subscription.total_payments,
+                ),
+            );
+        } else {
+            // ── Failure path — grace period / retry logic ─────────────────────
+            subscription.retry_count = subscription.retry_count.saturating_add(1);
+
+            if subscription.retry_count >= SUBSCRIPTION_MAX_RETRIES {
+                // Exhausted all retries — cancel the subscription.
+                subscription.status = SubscriptionStatus::Cancelled;
+                subscription.next_retry_at = None;
+
+                env.storage().persistent().set(
+                    &DataKey::Subscription(subscription_id.clone()),
+                    &subscription,
+                );
+
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "SUBSCRIPTION"),
+                        Symbol::new(&env, "CANCELLED"),
+                    ),
+                    (
+                        subscription_id,
+                        payer,
+                        subscription.retry_count,
+                    ),
+                );
+
+                return Err(Error::SubscriptionRetryExhausted);
+            } else {
+                // Schedule the next retry attempt.
+                let next_retry = now.saturating_add(SUBSCRIPTION_RETRY_INTERVAL_SECS);
+                subscription.next_retry_at = Some(next_retry);
+
+                env.storage().persistent().set(
+                    &DataKey::Subscription(subscription_id.clone()),
+                    &subscription,
+                );
+
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "SUBSCRIPTION"),
+                        Symbol::new(&env, "PAYMENT_FAILED"),
+                    ),
+                    (
+                        subscription_id,
+                        payer,
+                        subscription.retry_count,
+                        next_retry,
+                    ),
+                );
+
+                return Err(Error::SubscriptionInGracePeriod);
+            }
+        }
+
+        Ok(subscription.status)
     }
 
     pub fn resume_subscription(
@@ -2411,10 +2766,69 @@ impl PaymentProcessor {
         env.storage().persistent().extend_ttl(key, threshold, ttl);
     }
 
+    // ─── Merchant pre-authorization (pull payments) ───────────────────────────
+
+    /// Customer grants a merchant permission to pull up to `limit_per_period`
+    /// tokens per `period_secs`-second window.
+    pub fn pre_authorize_merchant(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+        token: Address,
+        limit_per_period: i128,
+        period_secs: u64,
+    ) -> Result<MerchantAuthorization, MerchantAuthError> {
+        MerchantPreAuth::pre_authorize_merchant(
+            env,
+            customer,
+            merchant,
+            token,
+            limit_per_period,
+            period_secs,
+        )
+    }
+
+    /// Customer revokes a previously granted merchant authorization.
+    pub fn revoke_merchant_authorization(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+    ) -> Result<(), MerchantAuthError> {
+        MerchantPreAuth::revoke_authorization(env, customer, merchant)
+    }
+
+    /// Merchant pulls `amount` tokens from the customer's account against
+    /// an existing pre-authorization.
+    pub fn pull_payment(
+        env: Env,
+        merchant: Address,
+        customer: Address,
+        amount: i128,
+    ) -> Result<i128, MerchantAuthError> {
+        MerchantPreAuth::pull_payment(env, merchant, customer, amount)
+    }
+
+    /// Return the stored authorization for a (customer, merchant) pair.
+    pub fn get_merchant_authorization(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+    ) -> Result<MerchantAuthorization, MerchantAuthError> {
+        MerchantPreAuth::get_authorization(env, customer, merchant)
+    }
+
+    /// Return the remaining pull budget for the current period.
+    pub fn merchant_authorization_remaining(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+    ) -> Result<i128, MerchantAuthError> {
+        MerchantPreAuth::remaining_limit(env, customer, merchant)
+    }
+
     pub fn cancel_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
         PaymentStreaming::cancel_stream(env, sender, stream_id)
     }
-
     pub fn cancel_multiple_streams(
         env: Env,
         sender: Address,
