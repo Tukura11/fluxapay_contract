@@ -65,6 +65,8 @@ pub struct PaymentCharge {
     pub memo_type: Option<String>,
     /// Token contract address used for this payment (None defaults to the configured USDC token).
     pub token_address: Option<Address>,
+    /// Optional 32-byte hash merchants can use to tie a payment to an order ID or customer ID.
+    pub metadata_hash: Option<BytesN<32>>,
 }
 
 #[contracttype]
@@ -187,6 +189,7 @@ pub struct CreatePaymentArgs {
     pub memo_type: Option<String>,
     pub token_address: Option<Address>,
     pub client_token: Option<String>,
+    pub metadata_hash: Option<BytesN<32>>,
 }
 
 #[contracttype]
@@ -322,6 +325,27 @@ pub struct Subscription {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BillingInterval {
+    Daily,
+    Weekly,
+    Monthly,
+    Annually,
+}
+
+impl BillingInterval {
+    /// Returns the approximate duration in seconds for each interval.
+    pub fn to_secs(&self) -> u64 {
+        match self {
+            BillingInterval::Daily => 86_400,
+            BillingInterval::Weekly => 604_800,
+            BillingInterval::Monthly => 2_592_000,   // 30 days
+            BillingInterval::Annually => 31_536_000, // 365 days
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionPlan {
     pub plan_id: String,
     pub merchant_id: Address,
@@ -330,6 +354,7 @@ pub struct SubscriptionPlan {
     pub amount: i128,
     pub currency: Symbol,
     pub interval_secs: u64,
+    pub billing_interval: BillingInterval,
     pub active: bool,
 }
 
@@ -490,6 +515,7 @@ impl RefundManager {
                 memo: None,
                 memo_type: None,
                 token_address: None,
+                metadata_hash: None,
             };
             env.storage()
                 .persistent()
@@ -1157,7 +1183,26 @@ impl RefundManager {
     }
 
     pub fn get_dispute(env: Env, dispute_id: String) -> Result<Dispute, Error> {
-        Self::get_dispute_internal(&env, &dispute_id)
+        let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
+        let now = env.ledger().timestamp();
+        if let Some(deadline) = dispute.review_deadline {
+            if now > deadline
+                && !dispute.escalated
+                && dispute.status != DisputeStatus::Resolved
+                && dispute.status != DisputeStatus::Rejected
+            {
+                dispute.escalated = true;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+                Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
+                env.events().publish(
+                    (Symbol::new(&env, "DISPUTE"), Symbol::new(&env, "ESCALATED")),
+                    (dispute.payment_id.clone(), dispute_id, dispute.amount),
+                );
+            }
+        }
+        Ok(dispute)
     }
 
     pub fn get_payment_disputes(env: Env, payment_id: String) -> Result<Vec<Dispute>, Error> {
@@ -1211,7 +1256,7 @@ impl RefundManager {
         description: String,
         amount: i128,
         currency: Symbol,
-        interval_secs: u64,
+        billing_interval: BillingInterval,
     ) -> Result<(), Error> {
         merchant.require_auth();
 
@@ -1223,9 +1268,7 @@ impl RefundManager {
             return Err(Error::InvalidAmount);
         }
 
-        if interval_secs == 0 {
-            return Err(Error::InvalidAmount);
-        }
+        let interval_secs = billing_interval.to_secs();
 
         let plan = SubscriptionPlan {
             plan_id: plan_id.clone(),
@@ -1235,6 +1278,7 @@ impl RefundManager {
             amount,
             currency,
             interval_secs,
+            billing_interval,
             active: true,
         };
 
@@ -2197,6 +2241,7 @@ impl PaymentProcessor {
             memo: args.memo.clone(),
             memo_type: args.memo_type.clone(),
             token_address: args.token_address.clone(),
+            metadata_hash: args.metadata_hash.clone(),
         };
 
         env.storage()
@@ -2694,6 +2739,7 @@ impl PaymentProcessor {
             memo_type: None,
             token_address: Some(settlement_token),
             client_token: None,
+            metadata_hash: None,
         };
 
         let payment = Self::create_payment(env.clone(), create_args)?;
@@ -2835,6 +2881,14 @@ impl PaymentProcessor {
         stream_ids: Vec<String>,
     ) -> Result<Vec<String>, StreamError> {
         PaymentStreaming::cancel_multiple_streams(env, sender, stream_ids)
+    }
+
+    pub fn batch_cancel_streams(
+        env: Env,
+        sender: Address,
+        stream_ids: Vec<String>,
+    ) -> Result<Vec<String>, StreamError> {
+        PaymentStreaming::batch_cancel_streams(env, sender, stream_ids)
     }
 
     pub fn batch_withdraw_to(

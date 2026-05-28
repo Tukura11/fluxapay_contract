@@ -809,6 +809,77 @@ impl PaymentStreaming {
         Ok(cancelled)
     }
 
+    /// Cancel up to `MAX_BATCH_CANCEL` streams in a single transaction, skipping
+    /// streams that are not active or not owned by `sender` instead of aborting.
+    /// Returns the list of successfully cancelled stream IDs.
+    pub fn batch_cancel_streams(
+        env: Env,
+        sender: Address,
+        stream_ids: Vec<String>,
+    ) -> Result<Vec<String>, StreamError> {
+        const MAX_BATCH_CANCEL: u32 = 20;
+        sender.require_auth();
+
+        let mut cancelled = Vec::new(&env);
+        let now = env.ledger().timestamp();
+
+        for (i, stream_id) in stream_ids.iter().enumerate() {
+            if i as u32 >= MAX_BATCH_CANCEL {
+                break;
+            }
+            let mut stream: PaymentStream = match env
+                .storage()
+                .persistent()
+                .get(&StreamDataKey::Stream(stream_id.clone()))
+            {
+                Some(s) => s,
+                None => continue,
+            };
+
+            if stream.sender != sender || stream.status != StreamStatus::Active {
+                continue;
+            }
+
+            let elapsed = now.saturating_sub(stream.last_checkpoint_at);
+            let newly_accrued = (elapsed as i128)
+                .saturating_mul(stream.rate_per_second)
+                .min(stream.remaining_deposit - stream.accrued_at_checkpoint);
+            stream.accrued_at_checkpoint =
+                stream.accrued_at_checkpoint.saturating_add(newly_accrued);
+            stream.last_checkpoint_at = now;
+
+            let accrued = stream.accrued_at_checkpoint;
+            let refund = stream.remaining_deposit.saturating_sub(accrued);
+
+            stream.status = StreamStatus::Cancelled;
+            stream.remaining_deposit = accrued;
+            env.storage()
+                .persistent()
+                .set(&StreamDataKey::Stream(stream_id.clone()), &stream);
+
+            let token_client = token::Client::new(&env, &stream.token);
+            if accrued > 0 {
+                token_client.transfer(&env.current_contract_address(), &stream.receiver, &accrued);
+            }
+            if refund > 0 {
+                token_client.transfer(&env.current_contract_address(), &stream.sender, &refund);
+            }
+
+            env.events().publish(
+                (
+                    Symbol::new(&env, "STREAM"),
+                    Symbol::new(&env, "CANCELLED"),
+                    stream_id.clone(),
+                ),
+                (sender.clone(), accrued, refund),
+            );
+
+            cancelled.push_back(stream_id);
+        }
+
+        Ok(cancelled)
+    }
+
     // ─── Batch withdrawal ─────────────────────────────────────────────────────
 
     /// Withdraw accrued amounts from multiple streams to specified destinations
