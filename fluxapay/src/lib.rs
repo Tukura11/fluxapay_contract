@@ -505,6 +505,7 @@ pub enum DataKey {
     CreationPaused,
     MerchantRegistryAddress,
     AllowedToken(Address),
+    Blacklisted(Address),
     MerchantAmountLimits(Address),
     GlobalAmountLimits,
     IdempotencyKey(String),
@@ -619,6 +620,50 @@ impl RefundManager {
 
     pub fn get_admin(env: Env) -> Option<Address> {
         AccessControl::get_admin(&env)
+    }
+
+    /// Add an address to the global blacklist (admin only).
+    pub fn add_to_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Blacklisted(address), &true);
+        Ok(())
+    }
+
+    /// Remove an address from the global blacklist (admin only).
+    pub fn remove_from_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Blacklisted(address), &false);
+        Ok(())
+    }
+
+    /// Returns true when an address is globally blacklisted.
+    pub fn is_blacklisted(env: Env, address: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::Blacklisted(address))
+            .unwrap_or(false)
+    }
+
+    fn require_not_blacklisted(env: &Env, address: &Address) -> Result<(), Error> {
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::Blacklisted(address.clone()))
+            .unwrap_or(false)
+        {
+            return Err(Error::Unauthorized);
+        }
+        Ok(())
     }
 
     /// Issue #168: Configure fee split destinations for refund fees.
@@ -755,9 +800,23 @@ impl RefundManager {
         refund_amount: i128,
         reason: String,
         requester: Address,
+    ) -> Result<String, Error> {
+        requester.require_auth();
+        Self::require_not_blacklisted(&env, &requester)?;
+        Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester, None)
+    }
+
+    /// Create a refund request with optional receipt hash metadata.
+    pub fn create_refund_with_receipt(
+        env: Env,
+        payment_id: String,
+        refund_amount: i128,
+        reason: String,
+        requester: Address,
         receipt_hash: Option<BytesN<32>>,
     ) -> Result<String, Error> {
         requester.require_auth();
+        Self::require_not_blacklisted(&env, &requester)?;
         Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester, receipt_hash)
     }
 
@@ -784,6 +843,8 @@ impl RefundManager {
         } else {
             return Err(Error::PaymentNotFound);
         };
+        Self::require_not_blacklisted(env, &payment.merchant_id)?;
+        Self::require_not_blacklisted(env, &requester)?;
 
         // Issue #76: Reject refunds unless payment.status == Confirmed
         if payment.status != PaymentStatus::Confirmed {
@@ -865,9 +926,11 @@ impl RefundManager {
 
     pub fn process_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
         operator.require_auth();
+        Self::require_not_blacklisted(&env, &operator)?;
         
         // Issue #171: Allow either operator OR customer (requester) to process approved refunds
         let refund = Self::get_refund_internal(&env, &refund_id)?;
+        Self::require_not_blacklisted(&env, &refund.requester)?;
         
         let has_settlement =
             AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
@@ -1034,9 +1097,6 @@ impl RefundManager {
                     let admin_muxed: MuxedAddress = (&admin).into();
                     let _ = token_client.try_transfer(&from, &admin_muxed, &fee);
                 }
-            if let Some(admin) = AccessControl::get_admin(env) {
-                let admin_muxed: MuxedAddress = (&admin).into();
-                let _ = token_client.try_transfer(&from, &admin_muxed, &admin_fee);
             }
         }
         
@@ -1132,6 +1192,7 @@ impl RefundManager {
         registry_address: Address,
     ) -> Result<String, Error> {
         merchant_id.require_auth();
+        Self::require_not_blacklisted(&env, &merchant_id)?;
 
         // Verify merchant KYC tier is Full or Business via cross-contract call
         let registry_client =
@@ -1156,6 +1217,9 @@ impl RefundManager {
 
         if payment.merchant_id != merchant_id {
             return Err(Error::Unauthorized);
+        }
+        if let Some(ref payer) = payment.payer_address {
+            Self::require_not_blacklisted(&env, payer)?;
         }
         if payment.status != PaymentStatus::Confirmed {
             return Err(Error::PaymentAlreadyProcessed);
@@ -3158,6 +3222,49 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Add an address to the global blacklist (admin only).
+    pub fn add_to_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Blacklisted(address), &true);
+        Ok(())
+    }
+
+    /// Remove an address from the global blacklist (admin only).
+    pub fn remove_from_blacklist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Blacklisted(address), &false);
+        Ok(())
+    }
+
+    /// Returns true when an address is globally blacklisted.
+    pub fn is_blacklisted(env: Env, address: Address) -> bool {
+        Self::is_blacklisted_address(&env, &address)
+    }
+
+    fn is_blacklisted_address(env: &Env, address: &Address) -> bool {
+        env.storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::Blacklisted(address.clone()))
+            .unwrap_or(false)
+    }
+
+    fn require_not_blacklisted(env: &Env, address: &Address) -> Result<(), Error> {
+        if Self::is_blacklisted_address(env, address) {
+            return Err(Error::Unauthorized);
+        }
+        Ok(())
+    }
+
     /// Returns true if the given token address is on the allowlist.
     pub fn is_token_allowed(env: Env, token_address: Address) -> bool {
         env.storage()
@@ -3170,6 +3277,8 @@ impl PaymentProcessor {
     pub fn create_payment(env: Env, args: CreatePaymentArgs) -> Result<PaymentCharge, Error> {
         Self::require_creation_not_paused(&env)?;
         args.merchant_id.require_auth();
+        Self::require_not_blacklisted(&env, &args.merchant_id)?;
+        Self::require_not_blacklisted(&env, &args.deposit_address)?;
 
         // Idempotency check: if client_token was already used, return the existing payment
         // (or error if it maps to a different payment_id).
@@ -3327,6 +3436,8 @@ impl PaymentProcessor {
         // Validate all payments first before creating any
         for args in args_list.iter() {
             args.merchant_id.require_auth();
+            Self::require_not_blacklisted(&env, &args.merchant_id)?;
+            Self::require_not_blacklisted(&env, &args.deposit_address)?;
 
             // Verify merchant role
             if !AccessControl::has_role(&env, &role_merchant(&env), &args.merchant_id) {
@@ -3490,12 +3601,15 @@ impl PaymentProcessor {
     ) -> Result<PaymentStatus, Error> {
         Self::require_not_paused(&env)?;
         oracle.require_auth();
+        Self::require_not_blacklisted(&env, &oracle)?;
+        Self::require_not_blacklisted(&env, &payer_address)?;
 
         if !AccessControl::has_role(&env, &role_oracle(&env), &oracle) {
             return Err(Error::Unauthorized);
         }
 
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
+        Self::require_not_blacklisted(&env, &payment.merchant_id)?;
 
         // Issue #75: Enforce idempotent verify_payment - reject double verification
         // If payment is already Confirmed, return current status without error
@@ -4178,6 +4292,9 @@ impl PaymentProcessor {
     }
 
     pub fn cancel_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
+        if Self::is_blacklisted_address(&env, &sender) {
+            return Err(StreamError::Unauthorized);
+        }
         PaymentStreaming::cancel_stream(env, sender, stream_id)
     }
     pub fn cancel_multiple_streams(
@@ -4185,6 +4302,9 @@ impl PaymentProcessor {
         sender: Address,
         stream_ids: Vec<String>,
     ) -> Result<Vec<String>, StreamError> {
+        if Self::is_blacklisted_address(&env, &sender) {
+            return Err(StreamError::Unauthorized);
+        }
         PaymentStreaming::cancel_multiple_streams(env, sender, stream_ids)
     }
 
@@ -4193,6 +4313,9 @@ impl PaymentProcessor {
         sender: Address,
         stream_ids: Vec<String>,
     ) -> Result<Vec<String>, StreamError> {
+        if Self::is_blacklisted_address(&env, &sender) {
+            return Err(StreamError::Unauthorized);
+        }
         PaymentStreaming::batch_cancel_streams(env, sender, stream_ids)
     }
 
@@ -4201,6 +4324,9 @@ impl PaymentProcessor {
         recipient: Address,
         withdrawals: Vec<WithdrawalRecipient>,
     ) -> Result<Vec<String>, StreamError> {
+        if Self::is_blacklisted_address(&env, &recipient) {
+            return Err(StreamError::Unauthorized);
+        }
         PaymentStreaming::batch_withdraw_to(env, recipient, withdrawals)
     }
 
@@ -4209,6 +4335,9 @@ impl PaymentProcessor {
         recipient: Address,
         max_streams: u32,
     ) -> Result<Vec<String>, StreamError> {
+        if Self::is_blacklisted_address(&env, &recipient) {
+            return Err(StreamError::Unauthorized);
+        }
         PaymentStreaming::withdraw_all_for_recipient(env, recipient, max_streams)
     }
 
@@ -4222,6 +4351,11 @@ impl PaymentProcessor {
         stream_id: String,
         destination: Address,
     ) -> Result<(), StreamError> {
+        if Self::is_blacklisted_address(&env, &recipient)
+            || Self::is_blacklisted_address(&env, &destination)
+        {
+            return Err(StreamError::Unauthorized);
+        }
         PaymentStreaming::set_stream_destination(env, recipient, stream_id, destination)
     }
 
@@ -4248,6 +4382,11 @@ impl PaymentProcessor {
         deposit: i128,
         stream_id: String,
     ) -> Result<PaymentStream, StreamError> {
+        if Self::is_blacklisted_address(&env, &sender)
+            || Self::is_blacklisted_address(&env, &receiver)
+        {
+            return Err(StreamError::Unauthorized);
+        }
         PaymentStreaming::create_stream(
             env,
             sender,

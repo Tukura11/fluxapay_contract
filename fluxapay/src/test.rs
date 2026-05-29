@@ -102,6 +102,22 @@ fn test_create_payment() {
 }
 
 #[test]
+fn test_create_payment_fails_for_blacklisted_merchant() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "blacklisted_payment_1");
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+    client.add_to_blacklist(&admin, &merchant_id);
+
+    let args = create_payment_args(&env, &payment_id, &merchant_id, 1000i128);
+    let result = client.try_create_payment(&args);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
 fn test_create_payment_rate_limit_enforced() {
     let env = Env::default();
     env.mock_all_auths();
@@ -172,6 +188,35 @@ fn test_cancel_multiple_streams_for_sender() {
     let stream2 = client.get_stream(&stream_id2);
     assert_eq!(stream1.status, StreamStatus::Cancelled);
     assert_eq!(stream2.status, StreamStatus::Cancelled);
+}
+
+#[test]
+fn test_create_stream_fails_for_blacklisted_sender() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let stream_id = String::from_str(&env, "blacklisted_stream_1");
+
+    token::StellarAssetClient::new(&env, &token).mint(&sender, &1_000_000i128);
+    client.add_to_blacklist(&admin, &sender);
+
+    let result = client.try_create_stream(
+        &sender,
+        &recipient,
+        &token,
+        &100i128,
+        &1_000i128,
+        &stream_id,
+    );
+    assert_eq!(result, Err(Ok(StreamError::Unauthorized)));
 }
 
 #[test]
@@ -263,6 +308,35 @@ fn test_verify_payment_success() {
     let payment = client.get_payment(&payment_id);
     assert_eq!(payment.status, PaymentStatus::Confirmed);
     assert_eq!(payment.amount_received, Some(amount));
+}
+
+#[test]
+fn test_verify_payment_fails_for_blacklisted_payer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "verify_blacklisted_payer");
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let args = create_payment_args(&env, &payment_id, &merchant_id, 1000i128);
+    client.create_payment(&args);
+
+    let oracle = Address::generate(&env);
+    client.grant_role(&admin, &role_oracle(&env), &oracle);
+
+    let blacklisted_payer = Address::generate(&env);
+    client.add_to_blacklist(&admin, &blacklisted_payer);
+
+    let result = client.try_verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::<32>::random(&env),
+        &blacklisted_payer,
+        &1000i128,
+    );
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 #[test]
@@ -588,6 +662,33 @@ fn test_process_refund() {
 
     let refund = client.get_refund(&refund_id);
     assert_eq!(refund.status, RefundStatus::Completed);
+}
+
+#[test]
+fn test_create_refund_fails_for_blacklisted_requester() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "refund_blacklisted_requester");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+
+    client.register_payment(
+        &payment_id,
+        &merchant_id,
+        &5000i128,
+        &Symbol::new(&env, "USDC"),
+    );
+    client.add_to_blacklist(&admin, &requester);
+
+    let result = client.try_create_refund(
+        &payment_id,
+        &1000i128,
+        &String::from_str(&env, "Reason"),
+        &requester,
+    );
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 #[test]

@@ -285,6 +285,15 @@ impl MerchantRegistry {
         env: Env,
         admin: Address,
         merchant_id: Address,
+    ) -> Result<(), MerchantError> {
+        Self::verify_merchant_with_signature(env, admin, merchant_id, None)
+    }
+
+    /// Verify merchant with optional oracle signature metadata.
+    pub fn verify_merchant_with_signature(
+        env: Env,
+        admin: Address,
+        merchant_id: Address,
         oracle_signature: Option<String>,
     ) -> Result<(), MerchantError> {
         admin.require_auth();
@@ -338,6 +347,16 @@ impl MerchantRegistry {
     /// * `tier` - The KYC tier to set
     /// * `oracle_signature` - Optional oracle signature for KYC verification
     pub fn set_kyc_tier(
+        env: Env,
+        admin: Address,
+        merchant_id: Address,
+        tier: KycTier,
+    ) -> Result<(), MerchantError> {
+        Self::set_kyc_tier_with_signature(env, admin, merchant_id, tier, None)
+    }
+
+    /// Set a specific KYC tier with optional oracle signature metadata.
+    pub fn set_kyc_tier_with_signature(
         env: Env,
         admin: Address,
         merchant_id: Address,

@@ -32,6 +32,7 @@ fn create_payment_args(
         memo_type: None,
         token_address: None,
         client_token: None,
+        metadata_hash: None,
     }
 }
 

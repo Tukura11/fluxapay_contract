@@ -1185,7 +1185,7 @@ fn test_verify_merchant_with_oracle_signature() {
     let signature = String::from_str(&env, "0x1234567890abcdef");
     
     // Verify merchant with oracle signature
-    client.verify_merchant(&admin, &merchant_id, &signature);
+    client.verify_merchant_with_signature(&admin, &merchant_id, &signature);
 
     let merchant = client.get_merchant(&merchant_id);
     assert_eq!(merchant.oracle_signature, Some(signature));
@@ -1216,7 +1216,7 @@ fn test_set_kyc_tier_with_oracle_signature() {
     let signature = String::from_str(&env, "0xabcdef1234567890");
     
     // Set KYC tier with oracle signature
-    client.set_kyc_tier(&admin, &merchant_id, &KycTier::Full, &signature);
+    client.set_kyc_tier_with_signature(&admin, &merchant_id, &KycTier::Full, &signature);
 
     let merchant = client.get_merchant(&merchant_id);
     assert_eq!(merchant.oracle_signature, Some(signature));
@@ -1274,7 +1274,7 @@ fn test_basic_tier_cap_enforced() {
         setup_volume_cap_env(&env);
 
     // Set merchant to Basic tier ($10,000 cap = 100_000_000_000 stroops)
-    registry_client.set_kyc_tier(&admin, &merchant, &KycTier::Basic, &String::from_str(&env, "sig"));
+    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Basic, &String::from_str(&env, "sig"));
 
     let deposit = Address::generate(&env);
 
@@ -1339,7 +1339,7 @@ fn test_business_tier_no_cap() {
         setup_volume_cap_env(&env);
 
     // Business tier: unlimited
-    registry_client.set_kyc_tier(&admin, &merchant, &KycTier::Business, &String::from_str(&env, "sig"));
+    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &String::from_str(&env, "sig"));
 
     let deposit = Address::generate(&env);
 
@@ -1378,7 +1378,7 @@ fn test_volume_resets_next_month() {
     let (admin, payment_client, registry_client, merchant, oracle) =
         setup_volume_cap_env(&env);
 
-    registry_client.set_kyc_tier(&admin, &merchant, &KycTier::Basic, &String::from_str(&env, "sig"));
+    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Basic, &String::from_str(&env, "sig"));
 
     let deposit = Address::generate(&env);
 
