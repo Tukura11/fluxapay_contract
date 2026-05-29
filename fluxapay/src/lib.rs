@@ -225,7 +225,7 @@ pub enum Error {
     /// Merchant has exceeded their KYC tier monthly processing volume cap.
     TierVolumeLimitExceeded = 34,
     /// Refund requested before cooldown period elapsed.
-    RefundCooldownNotElapsed = 34,
+    RefundCooldownNotElapsed = 42,
     /// Refund request has expired and cannot be processed.
     RefundExpired = 35,
     /// Insufficient arbitrators available for voting.
@@ -236,6 +236,10 @@ pub enum Error {
     FeeProposalNotReady = 38,
     /// No active fee proposal found.
     NoFeeProposal = 39,
+    /// Issue #180: Evidence field is not a valid IPFS multihash.
+    InvalidEvidence = 40,
+    /// Issue #185: One or both collaborative settlement signatures are invalid.
+    InvalidSettlementSignature = 41,
 }
 
 #[contracttype]
@@ -377,6 +381,25 @@ pub struct DisputeOperatorNote {
     pub operator_signature: String,
     /// Ledger timestamp when the note was recorded.
     pub recorded_at: u64,
+}
+
+/// Issue #185: Record of a collaboratively settled dispute.
+///
+/// Stored under `DataKey::CollaborativeSettlement(dispute_id)` when both
+/// the buyer and merchant sign an agreed settlement off-chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollaborativeSettlement {
+    /// The dispute that was settled.
+    pub dispute_id: String,
+    /// Agreed settlement amount (may be less than the full disputed amount).
+    pub settlement_amount: i128,
+    /// Ed25519 public key of the buyer used to verify `signature_buyer`.
+    pub buyer_pubkey: BytesN<32>,
+    /// Ed25519 public key of the merchant used to verify `signature_merchant`.
+    pub merchant_pubkey: BytesN<32>,
+    /// Ledger timestamp when the settlement was recorded.
+    pub settled_at: u64,
 }
 
 /// Configuration for creating a payment.
@@ -533,6 +556,12 @@ pub enum DataKey {
     CurrentFee,
     GlobalRateLimit,
     MerchantSpecificRateLimit(Address),
+    /// Issue #184: Total disputes filed against a merchant (keyed by merchant address).
+    MerchantDisputeCount(Address),
+    /// Issue #184: Total confirmed payments registered for a merchant (keyed by merchant address).
+    MerchantPaymentCount(Address),
+    /// Issue #185: Collaborative settlement record for a dispute.
+    CollaborativeSettlement(String),
 }
 
 // When building for WASM deployment, only the active contract's #[contractimpl]
@@ -724,7 +753,7 @@ impl RefundManager {
         {
             let payment = PaymentCharge {
                 payment_id: payment_id.clone(),
-                merchant_id,
+                merchant_id: merchant_id.clone(),
                 amount,
                 currency,
                 deposit_address: env.current_contract_address(),
@@ -746,6 +775,18 @@ impl RefundManager {
                 .persistent()
                 .set(&DataKey::Payment(payment_id.clone()), &payment);
             Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+
+            // Issue #184: Track confirmed payment count per merchant for dispute rate calculation
+            let count_key = DataKey::MerchantPaymentCount(merchant_id.clone());
+            let count: u64 = env
+                .storage()
+                .persistent()
+                .get(&count_key)
+                .unwrap_or(0u64);
+            env.storage()
+                .persistent()
+                .set(&count_key, &(count + 1));
+            Self::bump_ttl(&env, &count_key, LONG_LIVE_TTL);
         }
     }
 
@@ -1034,9 +1075,6 @@ impl RefundManager {
                     let admin_muxed: MuxedAddress = (&admin).into();
                     let _ = token_client.try_transfer(&from, &admin_muxed, &fee);
                 }
-            if let Some(admin) = AccessControl::get_admin(env) {
-                let admin_muxed: MuxedAddress = (&admin).into();
-                let _ = token_client.try_transfer(&from, &admin_muxed, &admin_fee);
             }
         }
         
@@ -1314,6 +1352,11 @@ impl RefundManager {
             return Err(Error::InvalidAmount);
         }
 
+        // Issue #180: Validate that evidence is a valid IPFS multihash (CIDv0 or CIDv1)
+        if !validate_ipfs_multihash(&evidence) {
+            return Err(Error::InvalidEvidence);
+        }
+
         // Issue #77: Load payment and cap dispute amount to confirmed payment amount
         let payment: PaymentCharge = env
             .storage()
@@ -1403,6 +1446,76 @@ impl RefundManager {
         );
 
         Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
+
+        // Issue #184: Track dispute count per merchant and auto-suspend if dispute rate is too high
+        let merchant_id = payment.merchant_id.clone();
+        let dispute_count_key = DataKey::MerchantDisputeCount(merchant_id.clone());
+        let dispute_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&dispute_count_key)
+            .unwrap_or(0u64);
+        let new_dispute_count = dispute_count + 1;
+        env.storage()
+            .persistent()
+            .set(&dispute_count_key, &new_dispute_count);
+        Self::bump_ttl(&env, &dispute_count_key, LONG_LIVE_TTL);
+
+        // Check dispute rate: if >= 10% of payments have disputes, auto-suspend via registry
+        let payment_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantPaymentCount(merchant_id.clone()))
+            .unwrap_or(0u64);
+
+        // Only evaluate after at least 5 payments to avoid false positives on new merchants
+        if payment_count >= 5 {
+            // dispute_rate_bps = (dispute_count * 10_000) / payment_count
+            let dispute_rate_bps = new_dispute_count
+                .saturating_mul(10_000)
+                .checked_div(payment_count)
+                .unwrap_or(0);
+
+            // Threshold: 1000 bps = 10%
+            if dispute_rate_bps >= 1_000 {
+                if let Some(registry_address) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+                {
+                    let registry_client =
+                        crate::merchant_registry::MerchantRegistryClient::new(
+                            &env,
+                            &registry_address,
+                        );
+                    // Auto-suspend for 30 days; ignore errors (registry may not have this merchant)
+                    let suspension_reason = String::from_str(
+                        &env,
+                        "Auto-suspended: dispute rate exceeded 10% threshold",
+                    );
+                    let thirty_days_secs: u64 = 30 * 24 * 60 * 60;
+                    let _ = registry_client.try_suspend_merchant_by_system(
+                        &merchant_id,
+                        &suspension_reason,
+                        &thirty_days_secs,
+                    );
+
+                    // Emit auto-suspension event for off-chain indexers
+                    env.events().publish(
+                        (
+                            Symbol::new(&env, "MERCHANT"),
+                            Symbol::new(&env, "AUTO_SUSPENDED"),
+                        ),
+                        (
+                            merchant_id,
+                            new_dispute_count,
+                            payment_count,
+                            dispute_rate_bps,
+                        ),
+                    );
+                }
+            }
+        }
 
         // Issue #27: emit DISPUTE_CREATED event
         env.events().publish(
@@ -1680,6 +1793,183 @@ impl RefundManager {
             .persistent()
             .get(&DataKey::DisputeOperatorNote(dispute_id))
             .ok_or(Error::DisputeNotFound)
+    }
+
+    // ─── Issue #185: Off-chain collaborative settlement ───────────────────────
+
+    /// Close a dispute instantly when both the buyer and merchant have agreed
+    /// on a settlement amount off-chain and submit their Ed25519 signatures.
+    ///
+    /// The message that both parties must sign is:
+    ///   `SHA-256( dispute_id_bytes || settlement_amount_bytes )`
+    /// where `settlement_amount_bytes` is the little-endian 16-byte encoding
+    /// of the `i128` settlement amount.
+    ///
+    /// # Parameters
+    /// * `dispute_id`         – The dispute to settle.
+    /// * `settlement_amount`  – Agreed amount to refund to the buyer (≤ disputed amount).
+    /// * `buyer_pubkey`       – Ed25519 public key of the buyer (32 bytes).
+    /// * `signature_buyer`    – Ed25519 signature from the buyer (64 bytes).
+    /// * `merchant_pubkey`    – Ed25519 public key of the merchant (32 bytes).
+    /// * `signature_merchant` – Ed25519 signature from the merchant (64 bytes).
+    pub fn settle_dispute_collaboratively(
+        env: Env,
+        dispute_id: String,
+        settlement_amount: i128,
+        buyer_pubkey: BytesN<32>,
+        signature_buyer: BytesN<64>,
+        merchant_pubkey: BytesN<32>,
+        signature_merchant: BytesN<64>,
+    ) -> Result<String, Error> {
+        if settlement_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let dispute = Self::get_dispute_internal(&env, &dispute_id)?;
+
+        if dispute.status == DisputeStatus::Resolved || dispute.status == DisputeStatus::Rejected {
+            return Err(Error::DisputeAlreadyResolved);
+        }
+
+        if settlement_amount > dispute.amount {
+            return Err(Error::InvalidAmount);
+        }
+
+        // Build the message: SHA-256(dispute_id_bytes || settlement_amount_le16)
+        // Both parties must have signed this exact message off-chain.
+        let message = Self::build_settlement_message(&env, &dispute_id, settlement_amount);
+
+        // Verify buyer signature
+        env.crypto()
+            .ed25519_verify(&buyer_pubkey, &message, &signature_buyer);
+
+        // Verify merchant signature
+        env.crypto()
+            .ed25519_verify(&merchant_pubkey, &message, &signature_merchant);
+
+        // Both signatures verified — create and process the refund
+        let refund_reason =
+            String::from_str(&env, "Collaborative off-chain settlement");
+
+        let refund_id = Self::create_refund_internal(
+            &env,
+            dispute.payment_id.clone(),
+            settlement_amount,
+            refund_reason,
+            dispute.disputer.clone(),
+            None,
+        )?;
+
+        // Process the refund immediately (no operator approval needed)
+        Self::process_refund_internal(&env, &env.current_contract_address(), refund_id.clone())?;
+
+        let now = env.ledger().timestamp();
+
+        // Persist the collaborative settlement record
+        let settlement = CollaborativeSettlement {
+            dispute_id: dispute_id.clone(),
+            settlement_amount,
+            buyer_pubkey,
+            merchant_pubkey,
+            settled_at: now,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::CollaborativeSettlement(dispute_id.clone()), &settlement);
+        Self::bump_ttl(
+            &env,
+            &DataKey::CollaborativeSettlement(dispute_id.clone()),
+            LONG_LIVE_TTL,
+        );
+
+        // Update dispute to Resolved
+        let mut dispute = Self::get_dispute_internal(&env, &dispute_id)?;
+        dispute.status = DisputeStatus::Resolved;
+        dispute.refund_id = Some(refund_id.clone());
+        dispute.resolved_at = Some(now);
+        dispute.resolution_notes = Some(String::from_str(
+            &env,
+            "Resolved via collaborative off-chain settlement",
+        ));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Dispute(dispute_id.clone()), &dispute);
+        Self::bump_dispute_ttl(&env, &dispute_id, &dispute.status);
+
+        // Emit event
+        env.events().publish(
+            (
+                Symbol::new(&env, "DISPUTE"),
+                Symbol::new(&env, "COLLABORATIVE_SETTLED"),
+            ),
+            (dispute_id, dispute.payment_id, settlement_amount),
+        );
+
+        Ok(refund_id)
+    }
+
+    /// Retrieve the collaborative settlement record for a dispute.
+    pub fn get_collaborative_settlement(
+        env: Env,
+        dispute_id: String,
+    ) -> Result<CollaborativeSettlement, Error> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CollaborativeSettlement(dispute_id))
+            .ok_or(Error::DisputeNotFound)
+    }
+
+    /// Issue #184: Get the current dispute count for a merchant.
+    pub fn get_merchant_dispute_count(env: Env, merchant_id: Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantDisputeCount(merchant_id))
+            .unwrap_or(0u64)
+    }
+
+    /// Issue #184: Get the current confirmed payment count for a merchant.
+    pub fn get_merchant_payment_count(env: Env, merchant_id: Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantPaymentCount(merchant_id))
+            .unwrap_or(0u64)
+    }
+
+    /// Build the canonical settlement message for collaborative dispute resolution.
+    ///
+    /// Message = SHA-256( dispute_id_bytes || settlement_amount_le16 )
+    fn build_settlement_message(
+        env: &Env,
+        dispute_id: &String,
+        settlement_amount: i128,
+    ) -> soroban_sdk::Bytes {
+        use soroban_sdk::Bytes;
+
+        let id_len = dispute_id.len() as usize;
+        let mut raw = Bytes::new(env);
+
+        // Append dispute_id bytes
+        let mut id_buf = [0u8; 64];
+        let read_len = id_len.min(64);
+        dispute_id.copy_into_slice(&mut id_buf[..read_len]);
+        for i in 0..read_len {
+            raw.push_back(id_buf[i]);
+        }
+
+        // Append settlement_amount as little-endian 16 bytes
+        let amount_bytes = settlement_amount.to_le_bytes();
+        for b in amount_bytes.iter() {
+            raw.push_back(*b);
+        }
+
+        // Return SHA-256 hash as Bytes
+        let hash: BytesN<32> = env.crypto().sha256(&raw);
+        let mut result = Bytes::new(env);
+        for i in 0..32u32 {
+            result.push_back(hash.get(i).unwrap());
+        }
+        result
     }
 
     // ─── Stake-weighted dispute voting (issue #33) ────────────────────────────
@@ -4333,6 +4623,7 @@ mod stream_test;
 
 pub mod utils;
 pub use utils::format_id;
+pub use utils::validate_ipfs_multihash;
 
 pub mod gas_estimator;
 pub use gas_estimator::{CostEstimate, GasEstimator, GasEstimatorClient, Operation};

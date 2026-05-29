@@ -1,5 +1,56 @@
 use soroban_sdk::{Bytes, Env, String};
 
+/// Validates that a string is a valid IPFS multihash (CIDv0 or CIDv1).
+///
+/// CIDv0: Base58-encoded SHA2-256 multihash, always starts with "Qm" and is 46 chars.
+/// CIDv1: Multibase-encoded, typically starts with "bafy" (base32 SHA2-256) and is ≥ 59 chars.
+///
+/// This performs a lightweight structural check (prefix + length) without
+/// a full base58/base32 decode, which is not feasible in `no_std` without
+/// additional crates.
+pub fn validate_ipfs_multihash(s: &String) -> bool {
+    let len = s.len() as usize;
+
+    // Need at least 4 bytes to check prefix
+    if len < 4 {
+        return false;
+    }
+
+    let mut buf = [0u8; 64];
+    let read_len = len.min(64);
+    s.copy_into_slice(&mut buf[..read_len]);
+
+    // CIDv0: starts with "Qm" and is exactly 46 characters
+    if buf[0] == b'Q' && buf[1] == b'm' {
+        return len == 46;
+    }
+
+    // CIDv1 base32 (most common): starts with "bafy" and is at least 59 characters
+    if buf[0] == b'b'
+        && buf[1] == b'a'
+        && buf[2] == b'f'
+        && buf[3] == b'y'
+    {
+        return len >= 59;
+    }
+
+    // CIDv1 base32 upper: starts with "BAFY"
+    if buf[0] == b'B'
+        && buf[1] == b'A'
+        && buf[2] == b'F'
+        && buf[3] == b'Y'
+    {
+        return len >= 59;
+    }
+
+    // CIDv1 base16 (hex): starts with "f" followed by hex digits, at least 34 chars
+    if buf[0] == b'f' && len >= 34 {
+        return true;
+    }
+
+    false
+}
+
 /// Converts a `u64` counter to a Soroban `String` with the given prefix.
 ///
 /// Examples: `format_id(env, "refund_", 1)` → `"refund_1"`
