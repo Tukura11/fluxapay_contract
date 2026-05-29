@@ -299,3 +299,25 @@ fn test_get_sender_streams_pagination() {
     let page3 = client.get_sender_streams(&sender, &2u32, &2u32);
     assert_eq!(page3.len(), 1);
 }
+
+#[test]
+fn test_withdrawn_event_includes_remaining_deposit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, sender, receiver, token) = setup(&env);
+    let token_client = token::StellarAssetClient::new(&env, &token);
+
+    let stream_id = String::from_str(&env, "stream_event");
+    let destination = Address::generate(&env);
+
+    // rate=10, deposit=500 → after 10s: withdrawable=100, remaining=400
+    client.create_stream(&sender, &receiver, &token, &10i128, &500i128, &stream_id);
+    client.set_stream_destination(&receiver, &stream_id, &destination);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.trigger_withdrawal(&stream_id);
+
+    let stream = client.get_stream(&stream_id);
+    assert_eq!(stream.remaining_deposit, 400);
+    assert_eq!(token_client.balance(&destination), 100i128);
+}

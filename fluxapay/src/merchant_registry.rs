@@ -103,6 +103,18 @@ pub enum MerchantDataKey {
     MerchantList,
     /// Optional: Address of the RefundManager contract for automatic MERCHANT role granting
     RefundManagerAddress,
+    /// Platform fee configuration
+    FeeConfig,
+}
+
+/// Platform fee configuration stored in MerchantRegistry.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeConfig {
+    /// Fee in basis points (e.g. 200 = 2%).
+    pub fee_bps: i128,
+    /// Address that receives the platform fee.
+    pub fee_recipient: Address,
 }
 
 #[contracterror]
@@ -522,6 +534,43 @@ impl MerchantRegistry {
         }
 
         result
+    }
+
+    /// Set the platform fee configuration (admin only).
+    pub fn set_fee_config(
+        env: Env,
+        admin: Address,
+        fee_bps: i128,
+        fee_recipient: Address,
+    ) -> Result<(), MerchantError> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::Admin)
+            .ok_or(MerchantError::Unauthorized)?;
+        if admin != stored_admin {
+            return Err(MerchantError::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::FeeConfig, &FeeConfig { fee_bps, fee_recipient });
+        Ok(())
+    }
+
+    /// Calculate the platform fee for a given amount using the stored fee config.
+    /// Returns `(fee_amount, fee_recipient)`. Returns `(0, contract_address)` if no config set.
+    pub fn calculate_fee(env: Env, amount: i128) -> (i128, Address) {
+        if let Some(config) = env
+            .storage()
+            .persistent()
+            .get::<MerchantDataKey, FeeConfig>(&MerchantDataKey::FeeConfig)
+        {
+            let fee = amount * config.fee_bps / 10_000;
+            (fee, config.fee_recipient)
+        } else {
+            (0, env.current_contract_address())
+        }
     }
 
     // Helper functions

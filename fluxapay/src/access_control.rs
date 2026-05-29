@@ -17,6 +17,10 @@ pub fn role_settlement_operator(env: &Env) -> Symbol {
     Symbol::new(env, "SETTLEMENT_OPERATOR")
 }
 
+pub fn role_arbitrator(env: &Env) -> Symbol {
+    Symbol::new(env, "ARBITRATOR")
+}
+
 #[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccessControlError {

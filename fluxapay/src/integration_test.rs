@@ -100,6 +100,7 @@ fn test_happy_path_flow() {
         &String::from_str(&env, "Product Damaged"),
         &String::from_str(&env, "Video evidence"),
         &customer,
+        &vec![&env],
     );
 
     let operator = Address::generate(&env);
@@ -225,6 +226,7 @@ fn test_failure_and_expiration_path() {
         &String::from_str(&env, "Late but flawed"),
         &String::from_str(&env, "N/A"),
         &customer,
+        &vec![&env],
     );
 
     let operator = Address::generate(&env);

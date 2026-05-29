@@ -1,10 +1,10 @@
 use crate::{
     Dispute, DisputeStatus, PaymentProcessor, PaymentProcessorClient, Refund, RefundManager,
-    RefundManagerClient, RefundStatus,
+    RefundManagerClient, RefundStatus, SettlementSplit,
 };
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _},
-    token, Address, BytesN, Env, String, Symbol,
+    token, vec, Address, BytesN, Env, String, Symbol,
 };
 
 fn setup_contracts(env: &Env) -> (Address, PaymentProcessorClient<'_>, RefundManagerClient<'_>) {
@@ -79,7 +79,7 @@ fn test_create_dispute() {
     let evidence = String::from_str(&env, "Tracking shows delivery failed");
 
     let dispute_id =
-        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer);
+        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer, &vec![&env]);
 
     // Verify dispute was created
     let dispute: Dispute = refund_client.get_dispute(&dispute_id);
@@ -124,7 +124,7 @@ fn test_review_dispute() {
     let evidence = String::from_str(&env, "Photo evidence attached");
 
     let dispute_id =
-        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer);
+        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer, &vec![&env]);
 
     // Review dispute
     refund_client.review_dispute(&operator, &dispute_id);
@@ -169,7 +169,7 @@ fn test_resolve_dispute_with_refund() {
     let evidence = String::from_str(&env, "Video evidence of defect");
 
     let dispute_id =
-        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer);
+        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer, &vec![&env]);
 
     // Resolve dispute with refund
     let resolution_notes = String::from_str(&env, "Dispute valid, issuing full refund");
@@ -229,7 +229,7 @@ fn test_reject_dispute() {
     let evidence = String::from_str(&env, "No evidence provided");
 
     let dispute_id =
-        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer);
+        refund_client.create_dispute(&payment_id, &amount, &dispute_reason, &evidence, &customer, &vec![&env]);
 
     // Reject dispute
     let resolution_notes = String::from_str(&env, "Insufficient evidence, dispute rejected");
@@ -275,6 +275,7 @@ fn test_get_payment_disputes() {
         &String::from_str(&env, "Partial refund needed"),
         &String::from_str(&env, "Evidence 1"),
         &customer,
+        &vec![&env],
     );
 
     let _dispute_id2 = refund_client.create_dispute(
@@ -283,6 +284,7 @@ fn test_get_payment_disputes() {
         &String::from_str(&env, "Additional dispute"),
         &String::from_str(&env, "Evidence 2"),
         &customer,
+        &vec![&env],
     );
 
     // Get all disputes for payment
@@ -315,6 +317,7 @@ fn test_dispute_invalid_amount() {
         &String::from_str(&env, "Dispute reason"),
         &String::from_str(&env, "Evidence"),
         &customer,
+        &vec![&env],
     );
 }
 
@@ -350,6 +353,7 @@ fn test_resolve_dispute_with_only_operator_auth() {
         &String::from_str(&env, "Item not received"),
         &String::from_str(&env, "Tracking shows lost"),
         &customer,
+        &vec![&env],
     );
 
     // Resolve — the internal create_refund_internal must NOT call

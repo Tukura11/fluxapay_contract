@@ -174,3 +174,8 @@ Emitted by the `PaymentProcessor` contract.
 Emitted when a new payment stream is created.
 - **Topics**: `(STREAM, CREATED)`
 - **Data**: `(stream_id: String, sender: Address, amount: i128)`
+
+### STREAM/WITHDRAWN
+Emitted when accrued tokens are withdrawn from a stream.
+- **Topics**: `(STREAM, WITHDRAWN, stream_id)`
+- **Data**: `(receiver: Address, destination: Address, amount: i128, remaining_deposit: i128)`

@@ -1221,3 +1221,215 @@ fn test_set_kyc_tier_with_oracle_signature() {
     let merchant = client.get_merchant(&merchant_id);
     assert_eq!(merchant.oracle_signature, Some(signature));
 }
+
+// ─── Tier-Based Volume Cap Tests (Issue #63) ─────────────────────────────────
+
+fn setup_volume_cap_env(
+    env: &Env,
+) -> (
+    Address,
+    PaymentProcessorClient<'_>,
+    MerchantRegistryClient<'_>,
+    Address, // merchant
+    Address, // oracle
+) {
+    let payment_contract = env.register(crate::PaymentProcessor, ());
+    let registry_contract = env.register(MerchantRegistry, ());
+
+    let payment_client = PaymentProcessorClient::new(env, &payment_contract);
+    let registry_client = MerchantRegistryClient::new(env, &registry_contract);
+
+    let admin = Address::generate(env);
+    payment_client.initialize_payment_processor(&admin);
+    registry_client.initialize(&admin);
+
+    // Link registry to payment processor
+    payment_client.set_merchant_registry_address(&admin, &registry_contract);
+
+    let merchant = Address::generate(env);
+    let oracle = Address::generate(env);
+
+    payment_client.grant_role(&admin, &Symbol::new(env, "MERCHANT"), &merchant);
+    payment_client.grant_role(&admin, &Symbol::new(env, "ORACLE"), &oracle);
+
+    registry_client.register_merchant(
+        &merchant,
+        &String::from_str(env, "Test Merchant"),
+        &String::from_str(env, "USDC"),
+        &None::<Address>,
+        &None::<String>,
+        &None,
+    );
+
+    (admin, payment_client, registry_client, merchant, oracle)
+}
+
+#[test]
+fn test_basic_tier_cap_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+
+    let (admin, payment_client, registry_client, merchant, oracle) =
+        setup_volume_cap_env(&env);
+
+    // Set merchant to Basic tier ($10,000 cap = 100_000_000_000 stroops)
+    registry_client.set_kyc_tier(&admin, &merchant, &KycTier::Basic, &String::from_str(&env, "sig"));
+
+    let deposit = Address::generate(&env);
+
+    // First payment: $9,000 — should succeed
+    let pid1 = String::from_str(&env, "pay_1");
+    payment_client.create_payment(&crate::CreatePaymentArgs {
+        payment_id: pid1.clone(),
+        merchant_id: merchant.clone(),
+        amount: 90_000_000_000,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: deposit.clone(),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+    });
+    payment_client.verify_payment(
+        &oracle,
+        &pid1,
+        &soroban_sdk::BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &90_000_000_000,
+    );
+
+    // Second payment: $2,000 — would push total to $11,000, exceeding $10,000 cap
+    let pid2 = String::from_str(&env, "pay_2");
+    payment_client.create_payment(&crate::CreatePaymentArgs {
+        payment_id: pid2.clone(),
+        merchant_id: merchant.clone(),
+        amount: 20_000_000_000,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: deposit.clone(),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+    });
+
+    let result = payment_client.try_verify_payment(
+        &oracle,
+        &pid2,
+        &soroban_sdk::BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &20_000_000_000,
+    );
+    assert!(result.is_err(), "Expected TierVolumeLimitExceeded error");
+}
+
+#[test]
+fn test_business_tier_no_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000_000);
+
+    let (admin, payment_client, registry_client, merchant, oracle) =
+        setup_volume_cap_env(&env);
+
+    // Business tier: unlimited
+    registry_client.set_kyc_tier(&admin, &merchant, &KycTier::Business, &String::from_str(&env, "sig"));
+
+    let deposit = Address::generate(&env);
+
+    // Pay well above any cap — should succeed
+    let pid = String::from_str(&env, "pay_big");
+    payment_client.create_payment(&crate::CreatePaymentArgs {
+        payment_id: pid.clone(),
+        merchant_id: merchant.clone(),
+        amount: 10_000_000_000_000, // $1,000,000
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: deposit.clone(),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+    });
+    payment_client.verify_payment(
+        &oracle,
+        &pid,
+        &soroban_sdk::BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &10_000_000_000_000,
+    );
+}
+
+#[test]
+fn test_volume_resets_next_month() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // Start at beginning of a month epoch
+    env.ledger().with_mut(|li| li.timestamp = 2_592_000); // epoch 1
+
+    let (admin, payment_client, registry_client, merchant, oracle) =
+        setup_volume_cap_env(&env);
+
+    registry_client.set_kyc_tier(&admin, &merchant, &KycTier::Basic, &String::from_str(&env, "sig"));
+
+    let deposit = Address::generate(&env);
+
+    // Fill up the cap this month ($10,000)
+    let pid1 = String::from_str(&env, "pay_m1");
+    payment_client.create_payment(&crate::CreatePaymentArgs {
+        payment_id: pid1.clone(),
+        merchant_id: merchant.clone(),
+        amount: 100_000_000_000,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: deposit.clone(),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+    });
+    payment_client.verify_payment(
+        &oracle,
+        &pid1,
+        &soroban_sdk::BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &100_000_000_000,
+    );
+
+    // Advance to next month epoch
+    env.ledger().with_mut(|li| li.timestamp = 2 * 2_592_000 + 1); // epoch 2
+
+    // Same amount should succeed in the new month
+    let pid2 = String::from_str(&env, "pay_m2");
+    payment_client.create_payment(&crate::CreatePaymentArgs {
+        payment_id: pid2.clone(),
+        merchant_id: merchant.clone(),
+        amount: 100_000_000_000,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: deposit.clone(),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+    });
+    payment_client.verify_payment(
+        &oracle,
+        &pid2,
+        &soroban_sdk::BytesN::<32>::random(&env),
+        &Address::generate(&env),
+        &100_000_000_000,
+    );
+}

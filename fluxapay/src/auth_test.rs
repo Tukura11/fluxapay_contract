@@ -4,7 +4,7 @@ use crate::{
 };
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _},
-    token, Address, BytesN, Env, String, Symbol,
+    token, vec, Address, BytesN, Env, String, Symbol,
 };
 
 fn setup_contracts(
@@ -94,6 +94,7 @@ fn test_create_dispute_without_disputer_signature() {
         &String::from_str(&env, "r"),
         &String::from_str(&env, "e"),
         &customer,
+        &vec![&env],
     );
 }
 

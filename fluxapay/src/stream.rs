@@ -644,7 +644,7 @@ impl PaymentStreaming {
                         Symbol::new(&env, "WITHDRAWN"),
                         stream_id.clone(),
                     ),
-                    (recipient.clone(), recipient.clone(), net),
+                    (recipient.clone(), recipient.clone(), withdrawable, stream.remaining_deposit),
                 );
 
                 processed.push_back(stream_id);
@@ -732,7 +732,7 @@ impl PaymentStreaming {
                 Symbol::new(&env, "WITHDRAWN"),
                 stream_id.clone(),
             ),
-            (stream.receiver.clone(), destination.clone(), net),
+            (stream.receiver.clone(), destination.clone(), withdrawable, stream.remaining_deposit),
         );
 
         Ok(stream_id)
@@ -1238,7 +1238,7 @@ impl PaymentStreaming {
                     Symbol::new(&env, "WITHDRAWN"),
                     w.stream_id.clone(),
                 ),
-                (recipient.clone(), w.destination.clone(), net),
+                (recipient.clone(), w.destination.clone(), withdrawable, stream.remaining_deposit),
             );
 
             processed.push_back(w.stream_id.clone());
