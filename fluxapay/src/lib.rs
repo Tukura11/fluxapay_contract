@@ -296,6 +296,13 @@ pub struct PauseInfo {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateLimitConfig {
+    pub window_secs: u64,
+    pub max_per_window: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MerchantCreateRateLimit {
     pub last_payment_at: u64,
     pub count: u32,
@@ -524,6 +531,8 @@ pub enum DataKey {
     MerchantMonthlyVolume(Address, u32),
     FeeProposal,
     CurrentFee,
+    GlobalRateLimit,
+    MerchantSpecificRateLimit(Address),
 }
 
 // When building for WASM deployment, only the active contract's #[contractimpl]
@@ -2831,9 +2840,40 @@ impl PaymentProcessor {
         env.storage()
             .persistent()
             .set(&DataKey::MerchantRegistryAddress, &registry_address);
-
         Ok(())
     }
+
+    pub fn set_global_rate_limit(
+        env: Env,
+        admin: Address,
+        window_secs: u64,
+        max_per_window: u32,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        let config = RateLimitConfig { window_secs, max_per_window };
+        env.storage().persistent().set(&DataKey::GlobalRateLimit, &config);
+        Ok(())
+    }
+
+    pub fn set_merchant_rate_limit(
+        env: Env,
+        admin: Address,
+        merchant_id: Address,
+        window_secs: u64,
+        max_per_window: u32,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        let config = RateLimitConfig { window_secs, max_per_window };
+        env.storage().persistent().set(&DataKey::MerchantSpecificRateLimit(merchant_id), &config);
+        Ok(())
+    }
+
 
     pub fn grant_role(
         env: Env,
@@ -2985,6 +3025,16 @@ impl PaymentProcessor {
 
     fn enforce_create_payment_rate_limit(env: &Env, merchant_id: &Address) -> Result<(), Error> {
         let now = env.ledger().timestamp();
+        
+        let config: RateLimitConfig = env.storage().persistent().get(&DataKey::MerchantSpecificRateLimit(merchant_id.clone()))
+            .unwrap_or_else(|| {
+                env.storage().persistent().get(&DataKey::GlobalRateLimit)
+                    .unwrap_or(RateLimitConfig {
+                        window_secs: CREATE_PAYMENT_WINDOW_SECS,
+                        max_per_window: CREATE_PAYMENT_MAX_PER_WINDOW,
+                    })
+            });
+
         let key = DataKey::MerchantRateLimit(merchant_id.clone());
 
         let mut state: MerchantCreateRateLimit =
@@ -2996,11 +3046,11 @@ impl PaymentProcessor {
                     count: 0,
                 });
 
-        if now.saturating_sub(state.last_payment_at) >= CREATE_PAYMENT_WINDOW_SECS {
+        if now.saturating_sub(state.last_payment_at) >= config.window_secs {
             state.count = 0;
         }
 
-        if state.count >= CREATE_PAYMENT_MAX_PER_WINDOW {
+        if state.count >= config.max_per_window {
             return Err(Error::RateLimitExceeded);
         }
 
