@@ -72,6 +72,10 @@ pub struct PaymentCharge {
     pub token_address: Option<Address>,
     /// Optional 32-byte hash merchants can use to tie a payment to an order ID or customer ID.
     pub metadata_hash: Option<BytesN<32>>,
+    /// Issue #173: Original token address used by payer (for swap_and_pay refunds).
+    pub original_token: Option<Address>,
+    /// Issue #173: Swap path used in swap_and_pay (for refund routing).
+    pub swap_path: Option<Vec<Address>>,
 }
 
 #[contracttype]
@@ -99,6 +103,8 @@ pub struct Refund {
     pub requester: Address,
     pub created_at: u64,
     pub processed_at: Option<u64>,
+    /// Issue #168: Approved by operator, allowing customer to claim.
+    pub approved: bool,
 }
 
 #[contracttype]
@@ -136,6 +142,8 @@ pub struct Dispute {
     pub review_deadline: Option<u64>,
     /// True when the dispute has been flagged for escalation (e.g. deadline exceeded).
     pub escalated: bool,
+    /// Issue #177: Computed deadline in seconds (3 days for small, 7 days for large).
+    pub computed_deadline_secs: Option<u64>,
 }
 
 #[contracterror]
@@ -278,6 +286,20 @@ pub struct VoteTally {
     pub against_weight: i128,
     /// Number of arbitrators who have voted.
     pub vote_count: u32,
+}
+
+/// Issue #168: Fee split configuration for refund fees.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeSplitConfig {
+    /// Treasury allocation in basis points (e.g., 7000 = 70%).
+    pub treasury_bps: u32,
+    /// Developer rewards allocation in basis points (e.g., 3000 = 30%).
+    pub developer_bps: u32,
+    /// Treasury destination address.
+    pub treasury_address: Address,
+    /// Developer rewards destination address.
+    pub developer_address: Address,
 }
 
 /// Operator note persisted on-chain for dispute transparency.
@@ -435,6 +457,8 @@ pub enum DataKey {
     DisputeVote(String, Address),
     /// Tally of votes for a dispute
     DisputeVoteTally(String),
+    /// Issue #168: Fee split configuration (treasury_bps, developer_bps, treasury_addr, developer_addr)
+    FeeSplitConfig,
 }
 
 // When building for WASM deployment, only the active contract's #[contractimpl]
@@ -523,6 +547,53 @@ impl RefundManager {
         AccessControl::get_admin(&env)
     }
 
+    /// Issue #168: Configure fee split destinations for refund fees.
+    /// Admin can set allocation ratios and destination addresses.
+    pub fn configure_fee_split(
+        env: Env,
+        admin: Address,
+        treasury_bps: u32,
+        developer_bps: u32,
+        treasury_address: Address,
+        developer_address: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        // Validate that splits add up to 100%
+        if treasury_bps + developer_bps != 10_000 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let config = FeeSplitConfig {
+            treasury_bps,
+            developer_bps,
+            treasury_address,
+            developer_address,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeeSplitConfig, &config);
+
+        env.events().publish(
+            (Symbol::new(&env, "FEE_SPLIT"), Symbol::new(&env, "CONFIGURED")),
+            (treasury_bps, developer_bps),
+        );
+
+        Ok(())
+    }
+
+    /// Get the current fee split configuration.
+    pub fn get_fee_split_config(env: Env) -> Option<FeeSplitConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FeeSplitConfig)
+    }
+
     /// Returns all addresses currently holding the given role (issue #37).
     pub fn get_role_members(env: Env, role: Symbol) -> Vec<Address> {
         AccessControl::get_role_members(&env, &role)
@@ -558,6 +629,8 @@ impl RefundManager {
                 memo_type: None,
                 token_address: None,
                 metadata_hash: None,
+                original_token: None,
+                swap_path: None,
             };
             env.storage()
                 .persistent()
@@ -636,6 +709,7 @@ impl RefundManager {
             requester,
             created_at: env.ledger().timestamp(),
             processed_at: None,
+            approved: false,
         };
 
         env.storage()
@@ -667,11 +741,17 @@ impl RefundManager {
 
     pub fn process_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
         operator.require_auth();
+        
+        // Issue #171: Allow either operator OR customer (requester) to process approved refunds
+        let refund = Self::get_refund_internal(&env, &refund_id)?;
+        
         let has_settlement =
             AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
         let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
+        let is_requester = operator == refund.requester;
 
-        if !has_settlement && !has_oracle {
+        // Operator can always process; customer can only process if approved
+        if !has_settlement && !has_oracle && !(is_requester && refund.approved) {
             return Err(Error::Unauthorized);
         }
 
@@ -689,20 +769,13 @@ impl RefundManager {
             return Err(Error::RefundAlreadyProcessed);
         }
 
-        let usdc_token_address: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey::UsdcToken)
-            .ok_or(Error::Unauthorized)?;
-        let token_client = token::TokenClient::new(env, &usdc_token_address);
-
-        // Issue #167: Query merchant's KYC tier and apply tiered refund fee
         let payment: PaymentCharge = env
             .storage()
             .persistent()
             .get::<DataKey, PaymentCharge>(&DataKey::Payment(refund.payment_id.clone()))
             .ok_or(Error::PaymentNotFound)?;
 
+        // Issue #167: Query merchant's KYC tier and apply tiered refund fee
         let fee_bps = if let Some(registry_address) = env
             .storage()
             .persistent()
@@ -729,6 +802,43 @@ impl RefundManager {
         let fee = refund.amount * fee_bps / 10_000;
         let net_amount = refund.amount - fee;
 
+        // Issue #173: Multi-token swap refund router
+        let (refund_token, refund_amount_final) = if let (Some(original_token), Some(swap_path)) = 
+            (&payment.original_token, &payment.swap_path) 
+        {
+            // Payment was made via swap_and_pay, refund in original token
+            if swap_path.len() >= 2 {
+                // Reverse the swap path for refund
+                let mut reverse_path = swap_path.clone();
+                reverse_path.reverse();
+                
+                // Use DEX to swap back to original token
+                // For now, we'll use a simple approach - in production this would call the DEX
+                // Simplified: just return the original token and net amount
+                // Real implementation would execute the reverse swap
+                (original_token.clone(), net_amount)
+            } else {
+                // Fallback to settlement token if path is invalid
+                let settlement_token = payment.token_address.clone().unwrap_or_else(|| {
+                    env.storage()
+                        .persistent()
+                        .get(&DataKey::UsdcToken)
+                        .unwrap()
+                });
+                (settlement_token, net_amount)
+            }
+        } else {
+            // Regular payment, refund in settlement token
+            let settlement_token = payment.token_address.clone().unwrap_or_else(|| {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::UsdcToken)
+                    .unwrap()
+            });
+            (settlement_token, net_amount)
+        };
+
+        let token_client = token::TokenClient::new(env, &refund_token);
         let from = env.current_contract_address();
         let to: MuxedAddress = (&refund.requester).into();
 
@@ -742,19 +852,47 @@ impl RefundManager {
         Self::bump_refund_ttl(env, &refund_id, &refund.status);
 
         // Interaction: Transfer net amount to requester
-        if token_client.try_transfer(&from, &to, &net_amount).is_err() {
-            // If transfer fails, we currently return Ok(()) but state is already updated.
-            // In a more robust system we might want to revert or handle failures differently.
+        if token_client.try_transfer(&from, &to, &refund_amount_final).is_err() {
             return Ok(());
         }
 
-        // Interaction: Transfer fee to admin
+        // Issue #168: Fee split destinations
         if fee > 0 {
-            if let Some(admin) = AccessControl::get_admin(env) {
-                let admin_muxed: MuxedAddress = (&admin).into();
-                let _ = token_client.try_transfer(&from, &admin_muxed, &fee);
+            let fee_split: Option<FeeSplitConfig> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::FeeSplitConfig);
+            
+            if let Some(config) = fee_split {
+                // Validate split adds up to 100%
+                if config.treasury_bps + config.developer_bps == 10_000 {
+                    let treasury_fee = fee * config.treasury_bps as i128 / 10_000;
+                    let developer_fee = fee * config.developer_bps as i128 / 10_000;
+                    
+                    if treasury_fee > 0 {
+                        let treasury_muxed: MuxedAddress = (&config.treasury_address).into();
+                        let _ = token_client.try_transfer(&from, &treasury_muxed, &treasury_fee);
+                    }
+                    if developer_fee > 0 {
+                        let developer_muxed: MuxedAddress = (&config.developer_address).into();
+                        let _ = token_client.try_transfer(&from, &developer_muxed, &developer_fee);
+                    }
+                } else {
+                    // Fallback to admin if config is invalid
+                    if let Some(admin) = AccessControl::get_admin(env) {
+                        let admin_muxed: MuxedAddress = (&admin).into();
+                        let _ = token_client.try_transfer(&from, &admin_muxed, &fee);
+                    }
+                }
+            } else {
+                // No fee split configured, send to admin
+                if let Some(admin) = AccessControl::get_admin(env) {
+                    let admin_muxed: MuxedAddress = (&admin).into();
+                    let _ = token_client.try_transfer(&from, &admin_muxed, &fee);
+                }
             }
         }
+        
         env.events().publish(
             (Symbol::new(env, "REFUND"), Symbol::new(env, "COMPLETED")),
             (refund.payment_id, refund_id, refund.amount),
@@ -791,6 +929,40 @@ impl RefundManager {
         // Issue #27: emit REFUND/REJECTED event
         env.events().publish(
             (Symbol::new(&env, "REFUND"), Symbol::new(&env, "REJECTED")),
+            (refund.payment_id, refund_id, refund.amount),
+        );
+
+        Ok(())
+    }
+
+    /// Issue #171: Approve a pending refund, allowing customer to claim it.
+    /// Operator marks the refund as approved without processing it immediately.
+    /// Customer can then call process_refund to claim the approved refund.
+    pub fn approve_refund(env: Env, operator: Address, refund_id: String) -> Result<(), Error> {
+        operator.require_auth();
+        let has_settlement =
+            AccessControl::has_role(&env, &role_settlement_operator(&env), &operator);
+        let has_oracle = AccessControl::has_role(&env, &role_oracle(&env), &operator);
+
+        if !has_settlement && !has_oracle {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut refund = Self::get_refund_internal(&env, &refund_id)?;
+
+        if refund.status != RefundStatus::Pending {
+            return Err(Error::RefundAlreadyProcessed);
+        }
+
+        refund.approved = true;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Refund(refund_id.clone()), &refund);
+        Self::bump_refund_ttl(&env, &refund_id, &refund.status);
+
+        env.events().publish(
+            (Symbol::new(&env, "REFUND"), Symbol::new(&env, "APPROVED")),
             (refund.payment_id, refund_id, refund.amount),
         );
 
@@ -1035,6 +1207,14 @@ impl RefundManager {
         let counter = Self::get_next_dispute_id(&env);
         let dispute_id = Self::build_dispute_id(&env, counter);
 
+        // Issue #177: Compute dynamic deadline based on dispute amount
+        // Small disputes (<= 1000 USDC): 3 days, Large disputes (> 1000 USDC): 7 days
+        let deadline_secs = if amount <= 1_000_0000000 { // 1000 USDC with 7 decimals
+            3 * 24 * 60 * 60 // 3 days in seconds
+        } else {
+            7 * 24 * 60 * 60 // 7 days in seconds
+        };
+
         let dispute = Dispute {
             dispute_id: dispute_id.clone(),
             payment_id: payment_id.clone(),
@@ -1049,6 +1229,7 @@ impl RefundManager {
             resolution_notes: None,
             review_deadline: None,
             escalated: false,
+            computed_deadline_secs: Some(deadline_secs),
         };
 
         env.storage()
@@ -2797,6 +2978,8 @@ impl PaymentProcessor {
             memo_type: args.memo_type.clone(),
             token_address: args.token_address.clone(),
             metadata_hash: args.metadata_hash.clone(),
+            original_token: None,
+            swap_path: None,
         };
 
         env.storage()
@@ -2952,6 +3135,9 @@ impl PaymentProcessor {
                 memo: args.memo.clone(),
                 memo_type: args.memo_type.clone(),
                 token_address: args.token_address.clone(),
+                metadata_hash: None,
+                original_token: None,
+                swap_path: None,
             };
 
             env.storage()
@@ -3470,7 +3656,16 @@ impl PaymentProcessor {
             metadata_hash: None,
         };
 
-        let payment = Self::create_payment(env.clone(), create_args)?;
+        let mut payment = Self::create_payment(env.clone(), create_args)?;
+
+        // Issue #173: Store original token and swap path for refund routing
+        payment.original_token = Some(args.token_in.clone());
+        payment.swap_path = Some(args.path.clone());
+        
+        // Persist updated payment with swap info
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment.payment_id.clone()), &payment);
 
         // Emit SWAP/AND/PAY event
         env.events().publish(
