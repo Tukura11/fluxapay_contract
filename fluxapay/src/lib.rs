@@ -32,6 +32,11 @@ const TIER_CAP_BASIC: i128 = 100_000_000_000;           // $10,000
 const TIER_CAP_FULL: i128 = 1_000_000_000_000;          // $100,000
 const TIER_CAP_BUSINESS: i128 = i128::MAX;              // unlimited
 
+// Issue #207: Cumulative volume thresholds for automatic KYC tier upgrades (in USDC stroops)
+const TIER_UPGRADE_THRESHOLD_BASIC: i128 = TIER_CAP_UNVERIFIED;      // $500 cumulative → Basic
+const TIER_UPGRADE_THRESHOLD_FULL: i128 = TIER_CAP_BASIC;             // $10,000 cumulative → Full
+const TIER_UPGRADE_THRESHOLD_BUSINESS: i128 = TIER_CAP_FULL;          // $100,000 cumulative → Business
+
 /// Maximum number of payment retries before a subscription is cancelled.
 pub const SUBSCRIPTION_MAX_RETRIES: u32 = 3;
 /// Spacing between retry attempts in seconds (2 days).
@@ -225,17 +230,17 @@ pub enum Error {
     /// Merchant has exceeded their KYC tier monthly processing volume cap.
     TierVolumeLimitExceeded = 34,
     /// Refund requested before cooldown period elapsed.
-    RefundCooldownNotElapsed = 34,
+    RefundCooldownNotElapsed = 35,
     /// Refund request has expired and cannot be processed.
-    RefundExpired = 35,
+    RefundExpired = 36,
     /// Insufficient arbitrators available for voting.
-    InsufficientArbitrators = 36,
+    InsufficientArbitrators = 37,
     /// Voting threshold not met for dispute resolution.
-    ArbitrationVotingThresholdNotMet = 37,
+    ArbitrationVotingThresholdNotMet = 38,
     /// Fee proposal has not matured for the required 7 days.
-    FeeProposalNotReady = 38,
+    FeeProposalNotReady = 39,
     /// No active fee proposal found.
-    NoFeeProposal = 39,
+    NoFeeProposal = 40,
 }
 
 #[contracttype]
@@ -522,6 +527,8 @@ pub enum DataKey {
     FeeSplitConfig,
     /// Monthly volume tracker: (merchant_id, month_epoch) → i128 cumulative amount
     MerchantMonthlyVolume(Address, u32),
+    /// Cumulative all-time payment volume per merchant for KYC tier auto-upgrades (issue #207).
+    MerchantCumulativeVolume(Address),
     FeeProposal,
     CurrentFee,
 }
@@ -944,8 +951,10 @@ impl RefundManager {
             // Payment was made via swap_and_pay, refund in original token
             if swap_path.len() >= 2 {
                 // Reverse the swap path for refund
-                let mut reverse_path = swap_path.clone();
-                reverse_path.reverse();
+                let mut reverse_path = Vec::new(&env);
+                for i in 0..swap_path.len() {
+                    reverse_path.push_back(swap_path.get(swap_path.len() - 1 - i).unwrap());
+                }
                 
                 // Use DEX to swap back to original token
                 // For now, we'll use a simple approach - in production this would call the DEX
@@ -1025,9 +1034,6 @@ impl RefundManager {
                     let admin_muxed: MuxedAddress = (&admin).into();
                     let _ = token_client.try_transfer(&from, &admin_muxed, &fee);
                 }
-            if let Some(admin) = AccessControl::get_admin(env) {
-                let admin_muxed: MuxedAddress = (&admin).into();
-                let _ = token_client.try_transfer(&from, &admin_muxed, &admin_fee);
             }
         }
         
@@ -1159,6 +1165,7 @@ impl RefundManager {
             refund_amount,
             reason,
             payment.payer_address.clone().ok_or(Error::Unauthorized)?,
+            None,
         )?;
 
         // Execute transfer immediately — no operator approval needed
@@ -1900,6 +1907,7 @@ impl RefundManager {
                 dispute.amount,
                 refund_reason,
                 dispute.disputer.clone(),
+                None,
             ) {
                 let _ = Self::process_refund_internal(&env, &operator, refund_id);
             }
@@ -2058,8 +2066,8 @@ impl RefundManager {
             .get(&voters_key)
             .unwrap_or(vec![&env]);
 
-        if voters.len() < ARBITRATOR_VOTING_THRESHOLD as usize {
-            return Ok(false); // Threshold not met
+        if voters.len() < ARBITRATOR_VOTING_THRESHOLD {
+            return Err(Error::ArbitrationVotingThresholdNotMet);
         }
 
         // Count approvals
@@ -2536,8 +2544,8 @@ impl RefundManager {
                         Symbol::new(&env, "CANCELLED"),
                     ),
                     (
-                        subscription_id,
-                        payer,
+                        subscription_id.clone(),
+                        payer.clone(),
                         subscription.retry_count,
                     ),
                 );
@@ -2898,9 +2906,7 @@ impl PaymentProcessor {
             timestamp: env.ledger().timestamp(),
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::CreationPaused, &state);
+        env.storage().persistent().set(&DataKey::CreationPaused, &state);
 
         let event_name = if paused {
             Symbol::new(&env, "CREATION_PAUSED")
@@ -3681,19 +3687,17 @@ impl PaymentProcessor {
             return Err(Error::InvalidSettlement);
         }
 
-        // Calculate platform fee via MerchantRegistry if configured
-        let (platform_fee, fee_recipient) =
-            if let Some(registry_address) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
-            {
-                let registry_client =
-                    crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-                registry_client.calculate_fee(&payment.amount)
-            } else {
-                (0i128, env.current_contract_address())
-            };
+        let (platform_fee, fee_recipient) = if let Some(registry_address) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+        {
+            let registry_client =
+                crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+            registry_client.calculate_platform_fee(&payment.amount)
+        } else {
+            (0i128, env.current_contract_address())
+        };
 
         let net_amount = payment.amount - platform_fee;
 
@@ -3718,8 +3722,7 @@ impl PaymentProcessor {
             {
                 let token_client = token::TokenClient::new(&env, &usdc_token_address);
                 let from = env.current_contract_address();
-                let fee_muxed: MuxedAddress = (&fee_recipient).into();
-                let _ = token_client.try_transfer(&from, &fee_muxed, &platform_fee);
+                let _ = token_client.try_transfer(&from, &fee_recipient, &platform_fee);
             }
         }
 
@@ -4028,7 +4031,60 @@ impl PaymentProcessor {
         env.storage().persistent().set(&key, &new_total);
         Self::bump_ttl(env, &key, LONG_LIVE_TTL);
 
+        // Issue #207: Track cumulative volume and auto-upgrade KYC tier at milestones.
+        let cum_key = DataKey::MerchantCumulativeVolume(merchant_id.clone());
+        let cumulative: i128 = env.storage().persistent().get(&cum_key).unwrap_or(0);
+        let new_cumulative = cumulative.saturating_add(amount);
+        env.storage().persistent().set(&cum_key, &new_cumulative);
+        Self::bump_ttl(env, &cum_key, LONG_LIVE_TTL);
+        if let Some(registry_address) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+        {
+            Self::maybe_upgrade_kyc_tier(env, merchant_id, &registry_address, new_cumulative);
+        }
+
         Ok(())
+    }
+
+    /// Issue #207: Attempt to auto-upgrade a merchant's KYC tier based on cumulative volume.
+    /// Silently no-ops if the registry call fails (e.g. payment processor address not configured).
+    fn maybe_upgrade_kyc_tier(
+        env: &Env,
+        merchant_id: &Address,
+        registry_address: &Address,
+        cumulative_volume: i128,
+    ) {
+        use crate::merchant_registry::{KycTier, MerchantRegistryClient};
+        let registry_client = MerchantRegistryClient::new(env, registry_address);
+        let merchant = match registry_client.try_get_merchant(merchant_id) {
+            Ok(Ok(m)) => m,
+            _ => return,
+        };
+        let next_tier = match merchant.kyc_tier {
+            KycTier::Unverified if cumulative_volume >= TIER_UPGRADE_THRESHOLD_BASIC => {
+                KycTier::Basic
+            }
+            KycTier::Basic if cumulative_volume >= TIER_UPGRADE_THRESHOLD_FULL => KycTier::Full,
+            KycTier::Full if cumulative_volume >= TIER_UPGRADE_THRESHOLD_BUSINESS => {
+                KycTier::Business
+            }
+            _ => return,
+        };
+        if matches!(
+            registry_client.try_auto_upgrade_kyc_tier(
+                &env.current_contract_address(),
+                merchant_id,
+                &next_tier,
+            ),
+            Ok(Ok(()))
+        ) {
+            env.events().publish(
+                (Symbol::new(env, "KYC_TIER"), Symbol::new(env, "UPGRADED")),
+                (merchant_id.clone(), cumulative_volume),
+            );
+        }
     }
 
     fn get_payment_internal(env: &Env, payment_id: &String) -> Result<PaymentCharge, Error> {

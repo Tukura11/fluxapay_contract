@@ -105,12 +105,14 @@ pub enum MerchantDataKey {
     RefundManagerAddress,
     /// Platform fee configuration
     FeeConfig,
+    /// Address of the PaymentProcessor contract for automatic KYC tier upgrades (issue #207)
+    PaymentProcessorAddress,
 }
 
 /// Platform fee configuration stored in MerchantRegistry.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FeeConfig {
+pub struct PlatformFeeConfig {
     /// Fee in basis points (e.g. 200 = 2%).
     pub fee_bps: i128,
     /// Address that receives the platform fee.
@@ -181,6 +183,9 @@ impl MerchantRegistry {
             created_at: env.ledger().timestamp(),
             suspension_reason: None,
             suspended_at: None,
+            suspension_expires_at: None,
+            oracle_signature: None,
+            last_payout_change_at: None,
             fee_config: MaybeFeeConfig::from(fee_config),
             metadata_hash: None,
             currency_payout_addresses: map![&env],
@@ -270,7 +275,7 @@ impl MerchantRegistry {
     /// 
     /// This function automatically reinstates merchants whose suspension has expired.
     pub fn get_merchant(env: Env, merchant_id: Address) -> Result<Merchant, MerchantError> {
-        Self::get_merchant_internal(&env, &merchant_id);
+        Self::get_merchant_internal(&env, &merchant_id)
     }
 
     /// Verify merchant (admin only) — sets KycTier::Basic for backward compatibility.
@@ -392,6 +397,79 @@ impl MerchantRegistry {
         env.storage()
             .persistent()
             .set(&MerchantDataKey::RefundManagerAddress, &refund_manager);
+
+        Ok(())
+    }
+
+    /// Set the PaymentProcessor contract address for automatic KYC tier upgrades (issue #207).
+    pub fn set_payment_processor_address(
+        env: Env,
+        admin: Address,
+        payment_processor: Address,
+    ) -> Result<(), MerchantError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::Admin)
+            .ok_or(MerchantError::Unauthorized)?;
+
+        if admin != stored_admin {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::PaymentProcessorAddress, &payment_processor);
+
+        Ok(())
+    }
+
+    /// Automatically upgrade a merchant's KYC tier based on cumulative payment volume (issue #207).
+    /// Only the registered PaymentProcessor contract may call this function.
+    /// Only tier promotions are allowed (Unverified→Basic→Full→Business); demotions are rejected.
+    pub fn auto_upgrade_kyc_tier(
+        env: Env,
+        caller: Address,
+        merchant_id: Address,
+        new_tier: KycTier,
+    ) -> Result<(), MerchantError> {
+        caller.require_auth();
+
+        let payment_processor: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::PaymentProcessorAddress)
+            .ok_or(MerchantError::Unauthorized)?;
+
+        if caller != payment_processor {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+
+        let is_promotion = matches!(
+            (&merchant.kyc_tier, &new_tier),
+            (KycTier::Unverified, KycTier::Basic)
+                | (KycTier::Basic, KycTier::Full)
+                | (KycTier::Full, KycTier::Business)
+        );
+
+        if !is_promotion {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        merchant.kyc_tier = new_tier;
+
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
+
+        env.events().publish(
+            (Symbol::new(&env, "MERCHANT"), Symbol::new(&env, "KYC_UPGRADED")),
+            merchant_id,
+        );
 
         Ok(())
     }
@@ -554,17 +632,17 @@ impl MerchantRegistry {
         }
         env.storage()
             .persistent()
-            .set(&MerchantDataKey::FeeConfig, &FeeConfig { fee_bps, fee_recipient });
+            .set(&MerchantDataKey::FeeConfig, &PlatformFeeConfig { fee_bps, fee_recipient });
         Ok(())
     }
 
-    /// Calculate the platform fee for a given amount using the stored fee config.
+    /// Calculate the platform fee for a given amount using the stored global fee config.
     /// Returns `(fee_amount, fee_recipient)`. Returns `(0, contract_address)` if no config set.
-    pub fn calculate_fee(env: Env, amount: i128) -> (i128, Address) {
+    pub fn calculate_platform_fee(env: Env, amount: i128) -> (i128, Address) {
         if let Some(config) = env
             .storage()
             .persistent()
-            .get::<MerchantDataKey, FeeConfig>(&MerchantDataKey::FeeConfig)
+            .get::<MerchantDataKey, PlatformFeeConfig>(&MerchantDataKey::FeeConfig)
         {
             let fee = amount * config.fee_bps / 10_000;
             (fee, config.fee_recipient)
@@ -652,7 +730,7 @@ impl MerchantRegistry {
     }
 
     fn get_merchant_internal(env: &Env, merchant_id: &Address) -> Result<Merchant, MerchantError> {
-        let mut merchant = env
+        let mut merchant: Merchant = env
             .storage()
             .persistent()
             .get(&MerchantDataKey::Merchant(merchant_id.clone()))

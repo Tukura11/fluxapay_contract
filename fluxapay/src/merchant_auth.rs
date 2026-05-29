@@ -14,7 +14,7 @@
 /// `MERCHANT_AUTH / GRANTED`  – customer grants a new authorization
 /// `MERCHANT_AUTH / REVOKED`  – customer revokes an existing authorization
 /// `MERCHANT_AUTH / CHARGED`  – merchant pulls funds against the authorization
-use soroban_sdk::{contracttype, token, Address, Env, Symbol};
+use soroban_sdk::{contracterror, contracttype, token, Address, Env, Symbol};
 
 // ─── Data types ───────────────────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ pub enum MerchantAuthDataKey {
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
-#[contracttype]
+#[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MerchantAuthError {
     /// No authorization exists for this (customer, merchant) pair.
