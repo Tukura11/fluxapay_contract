@@ -45,6 +45,7 @@ pub(crate) const ZERO_CONTRACT_STRKEY: &str =
     "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
 mod access_control;
+pub mod account_abstraction;
 mod dex_router;
 pub mod fx_oracle;
 pub mod merchant_auth;
