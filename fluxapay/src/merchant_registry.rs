@@ -78,6 +78,8 @@ pub struct Merchant {
     pub bank_account: Option<String>,
     /// KYC tier replaces the old `verified: bool` field.
     pub kyc_tier: KycTier,
+    /// Merchant-level toggle for accepting underpayments.
+    pub partial_payment_allowed: bool,
     pub active: bool,
     pub created_at: u64,
     pub suspension_reason: Option<String>,
@@ -179,6 +181,7 @@ impl MerchantRegistry {
             payout_address,
             bank_account,
             kyc_tier: KycTier::Unverified,
+            partial_payment_allowed: false,
             active: true,
             created_at: env.ledger().timestamp(),
             suspension_reason: None,
@@ -266,6 +269,28 @@ impl MerchantRegistry {
         env.events().publish(
             (Symbol::new(&env, "MERCHANT"), Symbol::new(&env, "UPDATED")),
             merchant_id,
+        );
+
+        Ok(())
+    }
+
+    /// Merchant can toggle whether partial payments are accepted.
+    pub fn set_partial_payment_allowed(
+        env: Env,
+        merchant_id: Address,
+        partial_payment_allowed: bool,
+    ) -> Result<(), MerchantError> {
+        merchant_id.require_auth();
+        let mut merchant = Self::get_merchant_internal(&env, &merchant_id)?;
+        merchant.partial_payment_allowed = partial_payment_allowed;
+
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::Merchant(merchant_id.clone()), &merchant);
+
+        env.events().publish(
+            (Symbol::new(&env, "MERCHANT"), Symbol::new(&env, "PARTIAL_PAYMENT_UPDATED")),
+            (merchant_id, partial_payment_allowed),
         );
 
         Ok(())

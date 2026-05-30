@@ -3665,7 +3665,7 @@ impl PaymentProcessor {
 
         let diff = amount_received - payment.amount;
 
-        let new_status = if (0..=tolerance).contains(&diff) {
+        let mut new_status = if (0..=tolerance).contains(&diff) {
             // Exact match or tiny overpay within tolerance → Confirmed
             PaymentStatus::Confirmed
         } else if diff > tolerance {
@@ -3678,6 +3678,36 @@ impl PaymentProcessor {
             // Meaningfully less than expected → PartiallyPaid
             PaymentStatus::PartiallyPaid
         };
+
+        // Issue #162: Merchant-configurable partial payment policy.
+        if new_status == PaymentStatus::PartiallyPaid {
+            let partial_allowed = if let Some(registry_address) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+            {
+                let registry_client =
+                    crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+                match registry_client.try_get_merchant(&payment.merchant_id) {
+                    Ok(Ok(merchant)) => merchant.partial_payment_allowed,
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            if !partial_allowed {
+                new_status = PaymentStatus::Failed;
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "REFUND"),
+                        Symbol::new(&env, "AUTO_REQUIRED"),
+                        payment.merchant_id.clone(),
+                    ),
+                    (payment_id.clone(), amount_received),
+                );
+            }
+        }
 
         // Issue #63: Enforce tier-based monthly volume cap before confirming payment.
         if new_status == PaymentStatus::Confirmed || new_status == PaymentStatus::Overpaid {
